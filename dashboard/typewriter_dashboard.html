@@ -158,33 +158,33 @@
     </div>
 
     <!-- BOT SUMMARY CARDS -->
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-xs">
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-2.5 text-xs">
       
       <!-- BOT A -->
       <div class="box-card p-2.5">
         <div class="flex justify-between items-center dashed-bottom pb-1 mb-1.5">
           <span class="font-bold tracking-tight text-[12px]">BOT A (HIGH SECURITY)</span>
-          <span class="text-[10px]" style="color: var(--text-muted)">SESSION #1</span>
+          <span class="text-[10px]" style="color: var(--text-muted)">T &le; 90s</span>
         </div>
         <div class="space-y-1">
           <div class="flex justify-between items-baseline">
             <span style="color: var(--text-muted)">BALANCE:</span>
             <div class="text-right">
-              <span id="bal-a" class="font-bold text-sm" style="color: var(--text-main)">$18.82</span>
+              <span id="bal-a" class="font-bold text-sm" style="color: var(--text-main)">$10.00</span>
               <span id="open-a" class="text-[10px] ml-1.5" style="color: var(--text-muted)"></span>
             </div>
           </div>
           <div class="flex justify-between">
             <span style="color: var(--text-muted)">NET PNL:</span>
-            <span id="pnl-a" class="font-bold" style="color: var(--text-main)">+$8.82 (+88.2%)</span>
+            <span id="pnl-a" class="font-bold" style="color: var(--text-main)">+$0.00 (+0.0%)</span>
           </div>
           <div class="flex justify-between">
             <span style="color: var(--text-muted)">WIN RATE:</span>
-            <span id="rate-a">43W - 1L (97.7%)</span>
+            <span id="rate-a">0W - 0L (0.0%)</span>
           </div>
           <div class="flex justify-between">
             <span style="color: var(--text-muted)">STREAK:</span>
-            <span id="streak-a" class="font-bold" style="color: var(--text-main)">14 WINS IN A ROW</span>
+            <span id="streak-a" class="font-bold" style="color: var(--text-main)">0 WINS IN A ROW</span>
           </div>
         </div>
       </div>
@@ -193,27 +193,56 @@
       <div class="box-card p-2.5">
         <div class="flex justify-between items-center dashed-bottom pb-1 mb-1.5">
           <span class="font-bold tracking-tight text-[12px]">BOT B (HIGH FREQUENCY)</span>
-          <span class="text-[10px]" style="color: var(--text-muted)">SESSION #2</span>
+          <span class="text-[10px]" style="color: var(--text-muted)">T &le; 90s</span>
         </div>
         <div class="space-y-1">
           <div class="flex justify-between items-baseline">
             <span style="color: var(--text-muted)">BALANCE:</span>
             <div class="text-right">
-              <span id="bal-b" class="font-bold text-sm" style="color: var(--text-main)">$24.32</span>
+              <span id="bal-b" class="font-bold text-sm" style="color: var(--text-main)">$10.00</span>
               <span id="open-b" class="text-[10px] ml-1.5" style="color: var(--text-muted)"></span>
             </div>
           </div>
           <div class="flex justify-between">
             <span style="color: var(--text-muted)">NET PNL:</span>
-            <span id="pnl-b" class="font-bold" style="color: var(--text-main)">+$14.32 (+143.2%)</span>
+            <span id="pnl-b" class="font-bold" style="color: var(--text-main)">+$0.00 (+0.0%)</span>
           </div>
           <div class="flex justify-between">
             <span style="color: var(--text-muted)">WIN RATE:</span>
-            <span id="rate-b">44W - 1L (97.8%)</span>
+            <span id="rate-b">0W - 0L (0.0%)</span>
           </div>
           <div class="flex justify-between">
             <span style="color: var(--text-muted)">STREAK:</span>
-            <span id="streak-b" class="font-bold" style="color: var(--text-main)">14 WINS IN A ROW</span>
+            <span id="streak-b" class="font-bold" style="color: var(--text-main)">0 WINS IN A ROW</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- BOT C -->
+      <div class="box-card p-2.5">
+        <div class="flex justify-between items-center dashed-bottom pb-1 mb-1.5">
+          <span class="font-bold tracking-tight text-[12px]">BOT C (ULTRA FREQUENCY)</span>
+          <span class="text-[10px]" style="color: var(--text-muted)">T &le; 120s</span>
+        </div>
+        <div class="space-y-1">
+          <div class="flex justify-between items-baseline">
+            <span style="color: var(--text-muted)">BALANCE:</span>
+            <div class="text-right">
+              <span id="bal-c" class="font-bold text-sm" style="color: var(--text-main)">$10.00</span>
+              <span id="open-c" class="text-[10px] ml-1.5" style="color: var(--text-muted)"></span>
+            </div>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">NET PNL:</span>
+            <span id="pnl-c" class="font-bold" style="color: var(--text-main)">+$0.00 (+0.0%)</span>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">WIN RATE:</span>
+            <span id="rate-c">0W - 0L (0.0%)</span>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">STREAK:</span>
+            <span id="streak-c" class="font-bold" style="color: var(--text-main)">0 WINS IN A ROW</span>
           </div>
         </div>
       </div>
@@ -242,9 +271,10 @@
         <div class="flex items-center space-x-2">
           <label for="filter-bot" class="font-bold shrink-0 text-[11px]" style="color: var(--text-muted)">BOT:</label>
           <select id="filter-bot" class="typewriter-select w-full">
-            <option value="ALL">ALL BOTS (A & B)</option>
-            <option value="BOT A">BOT A (HIGH SECURITY)</option>
-            <option value="BOT B">BOT B (HIGH FREQUENCY)</option>
+            <option value="ALL">ALL BOTS (A, B, C)</option>
+            <option value="BOT A">BOT A (HIGH SECURITY - 90s)</option>
+            <option value="BOT B">BOT B (HIGH FREQUENCY - 90s)</option>
+            <option value="BOT C">BOT C (ULTRA FREQUENCY - 120s)</option>
           </select>
         </div>
 
@@ -391,8 +421,9 @@
     };
 
     let currentSummary = {
-      bot_a: { balance: '$18.82', pnl: '+$8.82', wins: 43, losses: 1, rate: '97.7%', streak: 14 },
-      bot_b: { balance: '$24.32', pnl: '+$14.32', wins: 44, losses: 1, rate: '97.8%', streak: 14 }
+      bot_a: { balance: '$10.00', pnl: '+$0.00', wins: 0, losses: 0, rate: '0.0%', streak: 0 },
+      bot_b: { balance: '$10.00', pnl: '+$0.00', wins: 0, losses: 0, rate: '0.0%', streak: 0 },
+      bot_c: { balance: '$10.00', pnl: '+$0.00', wins: 0, losses: 0, rate: '0.0%', streak: 0 }
     };
 
     // Tracking for Audio Triggers
@@ -620,6 +651,23 @@
       document.getElementById('pnl-b').textContent = `${signB}$${Math.abs(numPnlB).toFixed(2)} (+${pctB}%)`;
       document.getElementById('rate-b').textContent = `${currentSummary.bot_b.wins}W - ${currentSummary.bot_b.losses}L (${currentSummary.bot_b.rate})`;
       document.getElementById('streak-b').textContent = currentSummary.bot_b.streak + " WINS IN A ROW";
+
+      // Bot C
+      if (currentSummary.bot_c) {
+        document.getElementById('bal-c').textContent = currentSummary.bot_c.balance;
+        const openC = currentSummary.bot_c.open_stake || 0;
+        const countC = currentSummary.bot_c.open_count || 0;
+        const openElC = document.getElementById('open-c');
+        if (openElC) {
+          openElC.textContent = openC > 0 ? `(-$${openC.toFixed(2)} in ${countC} open)` : '';
+        }
+        const numPnlC = parseFloat(String(currentSummary.bot_c.pnl).replace(/[^0-9.-]/g, '')) || 0;
+        const signC = numPnlC >= 0 ? '+' : '';
+        const pctC = ((numPnlC / 10.00) * 100).toFixed(1);
+        document.getElementById('pnl-c').textContent = `${signC}$${Math.abs(numPnlC).toFixed(2)} (+${pctC}%)`;
+        document.getElementById('rate-c').textContent = `${currentSummary.bot_c.wins}W - ${currentSummary.bot_c.losses}L (${currentSummary.bot_c.rate})`;
+        document.getElementById('streak-c').textContent = currentSummary.bot_c.streak + " WINS IN A ROW";
+      }
     }
 
     function renderTrades() {
@@ -761,6 +809,7 @@
           const json = await res.json();
           currentSummary.bot_a = json.bot_a;
           currentSummary.bot_b = json.bot_b;
+          currentSummary.bot_c = json.bot_c;
           allTrades = json.trades || [];
 
           // Audio Trigger Logic: New trades or losses
