@@ -242,7 +242,7 @@ def evaluate_and_trade(conn):
         # Check UP
         if gap >= up_safe:
             fill = fetch_live_orderbook_fill(up_tok, dn_tok, nominal_stake, cur, cid, asset, 'Up')
-            if fill and (0.65 <= fill['best_ask'] <= 0.95):
+            if fill and (0.65 <= fill['best_ask'] <= 0.98):
                 ask = fill['best_ask']
                 candidates.append({
                     'asset': asset, 'cycle_id': cid, 'direction': 'Up', 'elapsed': elapsed,
@@ -256,7 +256,7 @@ def evaluate_and_trade(conn):
         # Check DOWN
         elif gap <= dn_safe:
             fill = fetch_live_orderbook_fill(dn_tok, up_tok, nominal_stake, cur, cid, asset, 'Down')
-            if fill and (0.65 <= fill['best_ask'] <= 0.95):
+            if fill and (0.65 <= fill['best_ask'] <= 0.98):
                 ask = fill['best_ask']
                 candidates.append({
                     'asset': asset, 'cycle_id': cid, 'direction': 'Down', 'elapsed': elapsed,
