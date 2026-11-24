@@ -127,7 +127,7 @@ def get_dashboard_data():
             "asset": asset,
             "bot": bot_label,
             "direction": dir_str,
-            "entry": f"{entry_p:.2f}¢" if entry_p else "--",
+            "entry": f"{entry_p * 100:.1f}¢" if (entry_p and entry_p <= 1.0) else (f"{entry_p:.1f}¢" if entry_p else "--"),
             "stake": f"${stake:.2f}" if stake else "--",
             "shares": f"{shares:.2f}" if shares else "--",
             "pnl": f"{pnl:+.2f}" if pnl is not None else "--",

@@ -95,21 +95,21 @@ def get_or_create_cycle(conn, asset, cycle_ts, current_spot):
     cur = conn.cursor()
     cur.execute("SELECT strike_price, up_token_id, down_token_id, status FROM multi_cycles WHERE cycle_id = ? AND asset = ?", (cycle_ts, asset))
     row = cur.fetchone()
-    if row:
+    if row and row[1] and row[2]:
         return row[0], row[1], row[2], row[3]
         
     m_info = fetch_polymarket_market_info(asset, cycle_ts)
     slug = m_info.get("slug") if m_info else f"{asset.lower()}-updown-5m-{cycle_ts}"
     title = m_info.get("title") if m_info else f"{asset} Up or Down 5m"
-    up_token = m_info.get("up_token_id") if m_info else None
-    down_token = m_info.get("down_token_id") if m_info else None
+    up_token = m_info.get("up_token_id") if m_info else (row[1] if row else None)
+    down_token = m_info.get("down_token_id") if m_info else (row[2] if row else None)
     cond_id = m_info.get("condition_id") if m_info else None
     
     start_iso = datetime.datetime.fromtimestamp(cycle_ts, datetime.timezone.utc).isoformat()
     end_iso = datetime.datetime.fromtimestamp(cycle_ts + 300, datetime.timezone.utc).isoformat()
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     
-    strike_price = current_spot
+    strike_price = row[0] if (row and row[0]) else current_spot
     
     with conn:
         conn.execute("""
@@ -117,6 +117,15 @@ def get_or_create_cycle(conn, asset, cycle_ts, current_spot):
             (cycle_id, asset, slug, title, start_time, end_time, strike_price, up_token_id, down_token_id, condition_id, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (cycle_ts, asset, slug, title, start_iso, end_iso, strike_price, up_token, down_token, cond_id, now_iso, now_iso))
+        if row and (up_token or down_token):
+            conn.execute("""
+                UPDATE multi_cycles 
+                SET up_token_id = COALESCE(up_token_id, ?),
+                    down_token_id = COALESCE(down_token_id, ?),
+                    condition_id = COALESCE(condition_id, ?),
+                    updated_at = ?
+                WHERE cycle_id = ? AND asset = ?
+            """, (up_token, down_token, cond_id, now_iso, cycle_ts, asset))
         
     return strike_price, up_token, down_token, "ACTIVE"
 
