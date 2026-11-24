@@ -130,10 +130,9 @@ def fetch_live_orderbook_fill(token_id, opp_token_id, target_stake_usd, cur=None
                 shares = round(target_stake_usd / db_ask, 2)
                 return {
                     'best_ask': db_ask,
-                    'vwap_ask': db_ask,
+                    'ask': db_ask,
                     'shares': shares,
                     'depth': round(db_dep, 2),
-                    'slippage_pct': 0.0,
                     'source': 'DB_RECENT_SNAPSHOT'
                 }
 
@@ -143,46 +142,14 @@ def fetch_live_orderbook_fill(token_id, opp_token_id, target_stake_usd, cur=None
 
     sorted_asks = sorted(asks, key=lambda x: x["price"])
     best_ask = sorted_asks[0]["price"]
-    
-    remaining_stake = target_stake_usd
-    total_shares = 0.0
-    total_cost = 0.0
-    
-    for level in sorted_asks:
-        lvl_p = level["price"]
-        lvl_s = level["size"]
-        lvl_cap = lvl_p * lvl_s
-        
-        if remaining_stake <= 0:
-            break
-        if lvl_cap >= remaining_stake:
-            bought = remaining_stake / lvl_p
-            total_shares += bought
-            total_cost += remaining_stake
-            remaining_stake = 0.0
-            break
-        else:
-            total_shares += lvl_s
-            total_cost += lvl_cap
-            remaining_stake -= lvl_cap
-            
-    if remaining_stake > 0 and total_shares > 0:
-        deepest_p = sorted_asks[-1]["price"]
-        added_sh = remaining_stake / deepest_p
-        total_shares += added_sh
-        total_cost += remaining_stake
-
-    vwap = total_cost / total_shares if total_shares > 0 else best_ask
-    vwap = round(vwap, 4)
-    slippage_pct = round(((vwap - best_ask) / best_ask) * 100, 2) if best_ask > 0 else 0.0
+    shares = round(target_stake_usd / best_ask, 2)
     depth = round(sum(a["price"] * a["size"] for a in sorted_asks[:5]), 2)
     
     return {
         'best_ask': best_ask,
-        'vwap_ask': vwap,
-        'shares': round(total_shares, 2),
+        'ask': best_ask,
+        'shares': shares,
         'depth': depth,
-        'slippage_pct': slippage_pct,
         'source': 'LIVE_CLOB'
     }
 
@@ -275,13 +242,13 @@ def evaluate_and_trade(conn):
         # Check UP
         if gap >= up_safe:
             fill = fetch_live_orderbook_fill(up_tok, dn_tok, nominal_stake, cur, cid, asset, 'Up')
-            if fill and (0.65 <= fill['vwap_ask'] <= 0.95):
-                ask = fill['vwap_ask']
+            if fill and (0.65 <= fill['best_ask'] <= 0.95):
+                ask = fill['best_ask']
                 candidates.append({
                     'asset': asset, 'cycle_id': cid, 'direction': 'Up', 'elapsed': elapsed,
                     'remaining': remaining, 'spot': spot, 'strike': strike, 'gap': gap,
                     'ask': ask, 'best_ask': fill['best_ask'], 'depth': fill['depth'],
-                    'slippage_pct': fill['slippage_pct'], 'shares': fill['shares'],
+                    'shares': fill['shares'],
                     'source': fill['source'],
                     'rule': f'Golden Safe UP Gap >= +${up_safe} at T-{remaining}s'
                 })
@@ -289,13 +256,13 @@ def evaluate_and_trade(conn):
         # Check DOWN
         elif gap <= dn_safe:
             fill = fetch_live_orderbook_fill(dn_tok, up_tok, nominal_stake, cur, cid, asset, 'Down')
-            if fill and (0.65 <= fill['vwap_ask'] <= 0.95):
-                ask = fill['vwap_ask']
+            if fill and (0.65 <= fill['best_ask'] <= 0.95):
+                ask = fill['best_ask']
                 candidates.append({
                     'asset': asset, 'cycle_id': cid, 'direction': 'Down', 'elapsed': elapsed,
                     'remaining': remaining, 'spot': spot, 'strike': strike, 'gap': gap,
                     'ask': ask, 'best_ask': fill['best_ask'], 'depth': fill['depth'],
-                    'slippage_pct': fill['slippage_pct'], 'shares': fill['shares'],
+                    'shares': fill['shares'],
                     'source': fill['source'],
                     'rule': f'Golden Safe DOWN Gap <= ${dn_safe} at T-{remaining}s'
                 })
@@ -315,7 +282,7 @@ def evaluate_and_trade(conn):
         shares = round(stake / cand['ask'], 2)
         now_ts = int(time.time())
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        rule_desc = f"{cand['rule']} | {cand['source']} VWAP {cand['ask']*100:.1f}¢ (slip: +{cand['slippage_pct']}%, depth: ${cand['depth']:.2f})"
+        rule_desc = f"{cand['rule']} | {cand['source']} Best Ask {cand['ask']*100:.1f}¢ (depth: ${cand['depth']:.2f})"
 
         with conn:
             conn.execute("""
@@ -327,7 +294,7 @@ def evaluate_and_trade(conn):
                   shares, stake, rule_desc))
 
         available_cash -= stake
-        print(f"\n[BOT A EXECUTION] {cand['asset']} {cand['direction'].upper()} @ {cand['ask']*100:.1f}¢ ({cand['source']} VWAP, slip: +{cand['slippage_pct']}%) | Stake: ${stake:.2f} ({shares} sh) | Gap: {cand['gap']:+,.2f} | T-{cand['remaining']}s | Avail Cash: ${available_cash:.2f}", flush=True)
+        print(f"\n[BOT A EXECUTION] {cand['asset']} {cand['direction'].upper()} @ {cand['ask']*100:.1f}¢ ({cand['source']}) | Stake: ${stake:.2f} ({shares} sh) | Gap: {cand['gap']:+,.2f} | T-{cand['remaining']}s | Avail Cash: ${available_cash:.2f}", flush=True)
 
 def main():
     conn = sqlite3.connect(DB_PATH)
@@ -336,7 +303,7 @@ def main():
     print(f"Database: {DB_PATH}", flush=True)
     bal = get_wallet_balance(conn)
     print(f"Starting Bankroll: ${bal:.2f}", flush=True)
-    print(f"Execution Engine: Live CLOB VWAP Depth Slippage + Real-time In-Play Deduction", flush=True)
+    print(f"Execution Engine: Live CLOB Best Ask + Real-time In-Play Deduction", flush=True)
     print(f"Strategy: Cheapest-Ask Cross-Asset Prioritization & Multi-Trade Capacity", flush=True)
     print("==================================================================\n", flush=True)
 
