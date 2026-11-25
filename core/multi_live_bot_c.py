@@ -256,6 +256,7 @@ def evaluate_and_trade(conn):
             if fill and (MIN_ACCEPTABLE_ASK <= fill['best_ask'] <= MAX_ACCEPTABLE_ASK):
                 candidates.append({
                     'asset': asset, 'cycle_id': cid, 'direction': 'Up', 'token_id': up_tok,
+                    'opp_token_id': dn_tok,
                     'elapsed': elapsed, 'remaining': remaining, 'spot': spot, 'strike': strike,
                     'gap': gap, 'safe_gap': up_safe, 'ask': fill['best_ask'], 'depth': fill['depth'],
                     'rule': f'Bot C Ultra HF UP Gap >= +${up_safe} at T-{remaining}s'
@@ -267,6 +268,7 @@ def evaluate_and_trade(conn):
             if fill and (MIN_ACCEPTABLE_ASK <= fill['best_ask'] <= MAX_ACCEPTABLE_ASK):
                 candidates.append({
                     'asset': asset, 'cycle_id': cid, 'direction': 'Down', 'token_id': dn_tok,
+                    'opp_token_id': up_tok,
                     'elapsed': elapsed, 'remaining': remaining, 'spot': spot, 'strike': strike,
                     'gap': gap, 'safe_gap': dn_safe, 'ask': fill['best_ask'], 'depth': fill['depth'],
                     'rule': f'Bot C Ultra HF DOWN Gap <= ${dn_safe} at T-{remaining}s'
@@ -297,7 +299,9 @@ def evaluate_and_trade(conn):
             cand['asset'],
             str(cand['strike']),
             str(cand['safe_gap']),
-            cand['direction'].upper()
+            cand['direction'].upper(),
+            str(cand.get('opp_token_id') or ''),
+            str(cand['ask'])
         ]
 
         try:

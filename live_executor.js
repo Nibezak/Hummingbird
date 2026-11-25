@@ -55,14 +55,35 @@ function httpGetJson(url) {
   });
 }
 
-async function fetchOrderBook(tokenID) {
+async function fetchOrderBook(tokenID, oppTokenID = null) {
   try {
     const data = await httpGetJson(`https://clob.polymarket.com/book?token_id=${tokenID}`);
-    const asks = (data.asks || []).map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size) })).sort((a, b) => a.price - b.price);
-    const bids = (data.bids || []).map(b => ({ price: parseFloat(b.price), size: parseFloat(b.size) })).sort((a, b) => b.price - a.price);
+    let asks = (data.asks || []).map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size), type: 'direct' }));
+    let bids = (data.bids || []).map(b => ({ price: parseFloat(b.price), size: parseFloat(b.size), type: 'direct' }));
+
+    // Traverse complementary synthetic asks from opposite token bids (1.0 - bid)
+    if (oppTokenID) {
+      try {
+        const oppData = await httpGetJson(`https://clob.polymarket.com/book?token_id=${oppTokenID}`);
+        for (const b of (oppData.bids || [])) {
+          const bp = parseFloat(b.price);
+          const bs = parseFloat(b.size);
+          const synPrice = Math.round((1.0 - bp) * 10000) / 10000;
+          if (synPrice > 0 && bs > 0) {
+            asks.push({ price: synPrice, size: bs, type: 'synthetic' });
+          }
+        }
+      } catch (err) {
+        // opposite book optional
+      }
+    }
+
+    asks = asks.filter(a => a.price > 0 && a.size > 0).sort((a, b) => a.price - b.price);
+    bids = bids.filter(b => b.price > 0 && b.size > 0).sort((a, b) => b.price - a.price);
+
     const bestAsk = asks.length > 0 ? asks[0].price : null;
     const bestBid = bids.length > 0 ? bids[0].price : null;
-    const askDepth = asks.slice(0, 3).reduce((sum, a) => sum + (a.price * a.size), 0);
+    const askDepth = asks.slice(0, 5).reduce((sum, a) => sum + (a.price * a.size), 0);
     return { bestAsk, bestBid, askDepth: Math.round(askDepth * 100) / 100, asks, bids };
   } catch (err) {
     return { bestAsk: null, bestBid: null, askDepth: 0, asks: [], bids: [], error: err.message };
@@ -161,13 +182,15 @@ async function executeMarketBuy(tokenID, amountUSD, maxAcceptablePrice = 0.94) {
  */
 async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
   const {
-    maxAcceptablePrice = 0.94,
+    maxAcceptablePrice = 0.98,
     maxRetries = 3,
     retryDelayMs = 400,
     asset = null,
     strikePrice = null,
     minSafeGap = null,
-    direction = 'UP'
+    direction = 'UP',
+    oppTokenID = null,
+    expectedPrice = null
   } = options;
 
   const client = await getClient();
@@ -189,9 +212,11 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
     const tStart = Date.now();
     console.log(`\n[CHASER ATTEMPT ${attempt}/${maxRetries}] Checking live book for Token ${tokenID}...`);
 
-    // 1. Check live CLOB orderbook
-    const book = await fetchOrderBook(tokenID);
-    if (!book.bestAsk) {
+    // 1. Check live CLOB orderbook (both direct and synthetic complementary asks)
+    const book = await fetchOrderBook(tokenID, oppTokenID);
+    const candidateAsk = book.bestAsk || expectedPrice;
+
+    if (!candidateAsk) {
       console.log(`[CHASER ${attempt}] Empty or unreadable orderbook. Retrying in ${retryDelayMs}ms...`);
       history.push({ attempt, status: 'EMPTY_BOOK', latencyMs: Date.now() - tStart });
       if (attempt < maxRetries) await new Promise(r => setTimeout(r, retryDelayMs));
@@ -199,13 +224,13 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
     }
 
     // 2. Enforce price ceiling
-    if (book.bestAsk > maxAcceptablePrice) {
-      console.log(`[CHASER ${attempt}] REJECTED: Best ask (${book.bestAsk}c) exceeds ceiling (${maxAcceptablePrice}c). Kicking order out.`);
+    if (candidateAsk > maxAcceptablePrice) {
+      console.log(`[CHASER ${attempt}] REJECTED: Best ask (${candidateAsk}c) exceeds ceiling (${maxAcceptablePrice}c). Kicking order out.`);
       return {
         success: false,
         reason: 'PRICE_CEILING_EXCEEDED',
         attempt,
-        bestAsk: book.bestAsk,
+        bestAsk: candidateAsk,
         maxAcceptablePrice,
         history
       };
@@ -236,11 +261,13 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
 
     // 4. Submit FAK Market Order
     try {
-      console.log(`[CHASER ${attempt}] Submitting FAK Buy @ ${book.bestAsk}c (Depth: $${book.askDepth})...`);
+      const targetPrice = Math.min(candidateAsk, maxAcceptablePrice);
+      console.log(`[CHASER ${attempt}] Submitting FAK Buy @ ${targetPrice}c (Depth: $${book.askDepth})...`);
       const marketOrder = await client.createMarketOrder({
         tokenID,
         side: clobPkg.Side.BUY,
         amount: amountUSD,
+        price: targetPrice,
         orderType: clobPkg.OrderType.FAK
       });
 
@@ -250,17 +277,17 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
       history.push({
         attempt,
         status: isMatched ? 'FILLED' : 'PARTIAL_OR_UNFILLED',
-        bestAsk: book.bestAsk,
+        bestAsk: targetPrice,
         latencyMs: Date.now() - tStart,
         result
       });
 
       if (isMatched || result.orderID) {
-        console.log(`[CHASER ${attempt}] SUCCESS: Order matched at ~${book.bestAsk}c!`);
+        console.log(`[CHASER ${attempt}] SUCCESS: Order matched at ~${targetPrice}c!`);
         return {
           success: true,
           attempt,
-          executedAsk: book.bestAsk,
+          executedAsk: targetPrice,
           amountUSD,
           tokenID,
           result,
@@ -321,6 +348,8 @@ async function main() {
     const strike = args[6] ? parseFloat(args[6]) : null;
     const minGap = args[7] ? parseFloat(args[7]) : null;
     const direction = args[8] || 'UP';
+    const oppTokenID = args[9] || null;
+    const expectedPrice = args[10] ? parseFloat(args[10]) : null;
 
     const res = await executeMarketBuyWithChaser(tokenID, amount, {
       maxAcceptablePrice: maxPrice,
@@ -328,7 +357,9 @@ async function main() {
       asset,
       strikePrice: strike,
       minSafeGap: minGap,
-      direction
+      direction,
+      oppTokenID,
+      expectedPrice
     });
     console.log(JSON.stringify(res, null, 2));
   } else {
