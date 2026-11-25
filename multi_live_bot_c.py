@@ -13,7 +13,9 @@ LIVE_EXECUTOR_PATH = r"c:\projects\btc-5m-recorder\live_executor.js"
 
 CURRENT_SESSION = 4
 WALLET_ID = 4  # Wallet 4 for LIVE BOT C (Real USDC on Polymarket)
-STAKE_USD = 1.00
+STAKE_FRACTION = 0.15       # 15% of available cash
+MIN_STAKE_FLOOR = 1.00      # Polymarket CLOB minimum taker order size ($1.00 USDC)
+MAX_STAKE_CEILING = 10.00   # Upper safety ceiling per trade
 MAX_ACCEPTABLE_ASK = 0.98
 MIN_ACCEPTABLE_ASK = 0.65
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -203,7 +205,7 @@ def resolve_settled_trades(conn):
 
 def evaluate_and_trade(conn):
     wallet_balance = get_wallet_balance(conn)
-    if wallet_balance < STAKE_USD:
+    if wallet_balance < MIN_STAKE_FLOOR:
         return
 
     if is_in_blackout_window():
@@ -214,7 +216,7 @@ def evaluate_and_trade(conn):
     cur.execute("SELECT COALESCE(SUM(invested_usd), 0) FROM multi_trades WHERE session_id = ? AND status = 'OPEN'", (CURRENT_SESSION,))
     open_in_play = cur.fetchone()[0] or 0.0
     available_cash = max(0.0, wallet_balance - open_in_play)
-    if available_cash < STAKE_USD:
+    if available_cash < MIN_STAKE_FLOOR:
         return
 
     cur.execute("""
@@ -231,6 +233,7 @@ def evaluate_and_trade(conn):
         return
 
     candidates = []
+    nominal_stake = round(min(max(MIN_STAKE_FLOOR, available_cash * STAKE_FRACTION), MAX_STAKE_CEILING), 2)
 
     for r in rows:
         cid, asset, elapsed, remaining, spot, gap, up_ask, up_dep, dn_ask, dn_dep, strike, up_tok, dn_tok = r
@@ -249,7 +252,7 @@ def evaluate_and_trade(conn):
 
         # Check UP
         if gap >= up_safe and up_tok:
-            fill = fetch_live_orderbook_fill(up_tok, dn_tok, STAKE_USD, cur, cid, asset, 'Up')
+            fill = fetch_live_orderbook_fill(up_tok, dn_tok, nominal_stake, cur, cid, asset, 'Up')
             if fill and (MIN_ACCEPTABLE_ASK <= fill['best_ask'] <= MAX_ACCEPTABLE_ASK):
                 candidates.append({
                     'asset': asset, 'cycle_id': cid, 'direction': 'Up', 'token_id': up_tok,
@@ -260,7 +263,7 @@ def evaluate_and_trade(conn):
 
         # Check DOWN
         elif gap <= dn_safe and dn_tok:
-            fill = fetch_live_orderbook_fill(dn_tok, up_tok, STAKE_USD, cur, cid, asset, 'Down')
+            fill = fetch_live_orderbook_fill(dn_tok, up_tok, nominal_stake, cur, cid, asset, 'Down')
             if fill and (MIN_ACCEPTABLE_ASK <= fill['best_ask'] <= MAX_ACCEPTABLE_ASK):
                 candidates.append({
                     'asset': asset, 'cycle_id': cid, 'direction': 'Down', 'token_id': dn_tok,
@@ -276,15 +279,19 @@ def evaluate_and_trade(conn):
     candidates.sort(key=lambda x: x['ask'])
 
     for cand in candidates:
-        if available_cash < STAKE_USD:
-            break
+        stake = round(min(max(MIN_STAKE_FLOOR, available_cash * STAKE_FRACTION), MAX_STAKE_CEILING), 2)
+        if available_cash < stake:
+            if available_cash >= MIN_STAKE_FLOOR:
+                stake = round(available_cash, 2)
+            else:
+                break
 
-        print(f"\n[LIVE ORDER QUALIFIED] {cand['asset']} {cand['direction'].upper()} @ {cand['ask']*100:.1f}¢ | T-{cand['remaining']}s | Submitting on Polymarket CLOB...", flush=True)
+        print(f"\n[LIVE ORDER QUALIFIED] {cand['asset']} {cand['direction'].upper()} @ {cand['ask']*100:.1f}¢ | T-{cand['remaining']}s | Stake: ${stake:.2f} | Submitting on Polymarket CLOB...", flush=True)
 
         cmd = [
             'node', LIVE_EXECUTOR_PATH, 'chaser',
             str(cand['token_id']),
-            str(STAKE_USD),
+            str(stake),
             str(MAX_ACCEPTABLE_ASK),
             '3',
             cand['asset'],
@@ -299,7 +306,7 @@ def evaluate_and_trade(conn):
             
             if parsed and parsed.get('success'):
                 executed_ask = float(parsed.get('executedAsk') or cand['ask'])
-                shares = round(STAKE_USD / executed_ask, 2)
+                shares = round(stake / executed_ask, 2)
                 now_ts = int(time.time())
                 now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 rule_desc = f"{cand['rule']} | LIVE ON-CHAIN ORDERBOOK Best Ask {executed_ask*100:.1f}¢ (Chaser Filled)"
@@ -311,10 +318,10 @@ def evaluate_and_trade(conn):
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
                     """, (cand['cycle_id'], cand['asset'], CURRENT_SESSION, now_ts, now_iso, cand['direction'],
                           cand['elapsed'], cand['remaining'], cand['spot'], cand['strike'], cand['gap'], executed_ask,
-                          shares, STAKE_USD, rule_desc))
+                          shares, stake, rule_desc))
 
-                available_cash -= STAKE_USD
-                print(f"[LIVE BOT C FILLED!] {cand['asset']} {cand['direction'].upper()} @ {executed_ask*100:.1f}¢ | Stake: ${STAKE_USD:.2f} ({shares} sh) | Gap: {cand['gap']:+,.4f} | T-{cand['remaining']}s | Avail Cash: ${available_cash:.2f}", flush=True)
+                available_cash -= stake
+                print(f"[LIVE BOT C FILLED!] {cand['asset']} {cand['direction'].upper()} @ {executed_ask*100:.1f}¢ | Stake: ${stake:.2f} ({shares} sh) | Gap: {cand['gap']:+,.4f} | T-{cand['remaining']}s | Avail Cash: ${available_cash:.2f}", flush=True)
             else:
                 reason = parsed.get('reason') if parsed else 'UNKNOWN_OR_TIMEOUT'
                 print(f"[LIVE EXECUTION ABORTED] Reason: {reason} | Output: {exec_res.stdout[:150]}", flush=True)
@@ -328,7 +335,7 @@ def main():
     conn = sqlite3.connect(DB_PATH)
     print("==================================================================", flush=True)
     print(f"MULTI-ASSET LIVE BOT C (REAL USDC TRADING) ACTIVATED (RUN #{CURRENT_SESSION})", flush=True)
-    print(f"Initial Bankroll: ${get_wallet_balance(conn):.2f} USDC | Stake Per Trade: ${STAKE_USD:.2f}", flush=True)
+    print(f"Initial Bankroll: ${get_wallet_balance(conn):.2f} USDC | Stake Sizing: 15% (Min Floor: ${MIN_STAKE_FLOOR:.2f}, Max Cap: ${MAX_STAKE_CEILING:.2f})", flush=True)
     print(f"Execution Engine: Polymarket CLOB Taker with Adaptive Chaser & Verification", flush=True)
     print(f"Price Bounds: {MIN_ACCEPTABLE_ASK*100:.0f}¢ <= Ask <= {MAX_ACCEPTABLE_ASK*100:.0f}¢ | Window: T-120s to T-15s", flush=True)
     print("==================================================================", flush=True)
