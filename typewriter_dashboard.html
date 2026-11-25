@@ -158,7 +158,7 @@
     </div>
 
     <!-- BOT SUMMARY CARDS -->
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-2.5 text-xs">
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
       
       <!-- BOT A -->
       <div class="box-card p-2.5">
@@ -247,6 +247,35 @@
         </div>
       </div>
 
+      <!-- LIVE BOT C (REAL MONEY) -->
+      <div class="box-card p-2.5" style="border: 1px solid #10b981;">
+        <div class="flex justify-between items-center dashed-bottom pb-1 mb-1.5" style="border-bottom: 1px dashed #10b981;">
+          <span class="font-bold tracking-tight text-[12px] text-emerald-600 dark:text-emerald-400">LIVE BOT C (REAL USDC)</span>
+          <span class="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">ON-CHAIN</span>
+        </div>
+        <div class="space-y-1">
+          <div class="flex justify-between items-baseline">
+            <span style="color: var(--text-muted)">BALANCE:</span>
+            <div class="text-right">
+              <span id="bal-live" class="font-bold text-sm text-emerald-600 dark:text-emerald-400">$6.34</span>
+              <span id="open-live" class="text-[10px] ml-1.5" style="color: var(--text-muted)"></span>
+            </div>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">NET PNL:</span>
+            <span id="pnl-live" class="font-bold text-emerald-600 dark:text-emerald-400">+$0.00 (+0.0%)</span>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">WIN RATE:</span>
+            <span id="rate-live">0W - 0L (0.0%)</span>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">STREAK:</span>
+            <span id="streak-live" class="font-bold" style="color: var(--text-main)">0 WINS IN A ROW</span>
+          </div>
+        </div>
+      </div>
+
     </div>
 
     <!-- TYPEWRITER DROPDOWN FILTERS BAR -->
@@ -271,10 +300,11 @@
         <div class="flex items-center space-x-2">
           <label for="filter-bot" class="font-bold shrink-0 text-[11px]" style="color: var(--text-muted)">BOT:</label>
           <select id="filter-bot" class="typewriter-select w-full">
-            <option value="ALL">ALL BOTS (A, B, C)</option>
+            <option value="ALL">ALL BOTS (A, B, C, LIVE)</option>
             <option value="BOT A">BOT A (HIGH SECURITY - 90s)</option>
             <option value="BOT B">BOT B (HIGH FREQUENCY - 90s)</option>
             <option value="BOT C">BOT C (ULTRA FREQUENCY - 120s)</option>
+            <option value="LIVE BOT C">LIVE BOT C (REAL USDC)</option>
           </select>
         </div>
 
@@ -423,7 +453,8 @@
     let currentSummary = {
       bot_a: { balance: '$10.00', pnl: '+$0.00', wins: 0, losses: 0, rate: '0.0%', streak: 0 },
       bot_b: { balance: '$10.00', pnl: '+$0.00', wins: 0, losses: 0, rate: '0.0%', streak: 0 },
-      bot_c: { balance: '$10.00', pnl: '+$0.00', wins: 0, losses: 0, rate: '0.0%', streak: 0 }
+      bot_c: { balance: '$10.00', pnl: '+$0.00', wins: 0, losses: 0, rate: '0.0%', streak: 0 },
+      live_bot: { balance: '$6.34', pnl: '+$0.00', wins: 0, losses: 0, rate: '0.0%', streak: 0 }
     };
 
     // Tracking for Audio Triggers
@@ -668,6 +699,27 @@
         document.getElementById('rate-c').textContent = `${currentSummary.bot_c.wins}W - ${currentSummary.bot_c.losses}L (${currentSummary.bot_c.rate})`;
         document.getElementById('streak-c').textContent = currentSummary.bot_c.streak + " WINS IN A ROW";
       }
+
+      // Live Bot C (Real Money)
+      if (currentSummary.live_bot) {
+        const liveBalEl = document.getElementById('bal-live');
+        if (liveBalEl) liveBalEl.textContent = currentSummary.live_bot.balance;
+        const openLive = currentSummary.live_bot.open_stake || 0;
+        const countLive = currentSummary.live_bot.open_count || 0;
+        const openElLive = document.getElementById('open-live');
+        if (openElLive) {
+          openElLive.textContent = openLive > 0 ? `(-$${openLive.toFixed(2)} in ${countLive} open)` : '';
+        }
+        const numPnlLive = parseFloat(String(currentSummary.live_bot.pnl).replace(/[^0-9.-]/g, '')) || 0;
+        const signLive = numPnlLive >= 0 ? '+' : '';
+        const pctLive = ((numPnlLive / 6.34) * 100).toFixed(1);
+        const pnlElLive = document.getElementById('pnl-live');
+        if (pnlElLive) pnlElLive.textContent = `${signLive}$${Math.abs(numPnlLive).toFixed(2)} (${signLive}${pctLive}%)`;
+        const rateElLive = document.getElementById('rate-live');
+        if (rateElLive) rateElLive.textContent = `${currentSummary.live_bot.wins}W - ${currentSummary.live_bot.losses}L (${currentSummary.live_bot.rate})`;
+        const streakElLive = document.getElementById('streak-live');
+        if (streakElLive) streakElLive.textContent = currentSummary.live_bot.streak + " WINS IN A ROW";
+      }
     }
 
     function renderTrades() {
@@ -810,6 +862,7 @@
           currentSummary.bot_a = json.bot_a;
           currentSummary.bot_b = json.bot_b;
           currentSummary.bot_c = json.bot_c;
+          currentSummary.live_bot = json.live_bot;
           allTrades = json.trades || [];
 
           // Audio Trigger Logic: New trades or losses

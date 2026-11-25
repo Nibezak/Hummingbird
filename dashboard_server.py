@@ -94,6 +94,28 @@ def get_dashboard_data():
         if row[0] == 1: streak_c += 1
         else: break
 
+    # 5. Live Bot C Stats (session_id = 4 - Real Money)
+    cur.execute("""
+        SELECT COUNT(*), 
+               SUM(CASE WHEN is_winner=1 THEN 1 ELSE 0 END), 
+               SUM(CASE WHEN is_winner=0 THEN 1 ELSE 0 END),
+               COALESCE(SUM(pnl), 0)
+        FROM multi_trades 
+        WHERE session_id = 4 AND status LIKE 'RESOLVED%'
+    """)
+    tot_live, wins_live, loss_live, pnl_live = cur.fetchone()
+    tot_live = tot_live or 0
+    wins_live = wins_live or 0
+    loss_live = loss_live or 0
+    pnl_live = pnl_live or 0.0
+    rate_live = (wins_live / tot_live * 100) if tot_live > 0 else 0.0
+
+    cur.execute("SELECT is_winner FROM multi_trades WHERE session_id = 4 AND status LIKE 'RESOLVED%' ORDER BY trade_id DESC")
+    streak_live = 0
+    for row in cur.fetchall():
+        if row[0] == 1: streak_live += 1
+        else: break
+
     # 5. Trades (fetch all recent trades with on-chain token IDs, remaining time, and Polymarket links)
     cur.execute("""
         SELECT t.trade_id, t.asset, t.session_id, t.direction, t.entry_price, t.invested_usd, 
@@ -111,7 +133,7 @@ def get_dashboard_data():
          cycle_id, rem, spot, strike, gap, shares, rule, slug, cond_id, up_token, down_token) = r
         
         t_time = call_time[11:19] if call_time and len(call_time) >= 19 else "--:--:--"
-        bot_label = "BOT A" if sess_id == 1 else ("BOT B" if sess_id == 2 else "BOT C")
+        bot_label = "BOT A" if sess_id == 1 else ("BOT B" if sess_id == 2 else ("BOT C" if sess_id == 3 else "LIVE BOT C"))
         outcome_label = "WIN" if status == "RESOLVED_WIN" else ("LOSS" if status == "RESOLVED_LOSS" else "OPEN")
         
         dir_str = (direction or "").upper()
@@ -163,6 +185,11 @@ def get_dashboard_data():
     open_count_c = open_stats.get(3, {}).get('open_count', 0)
     active_bal_c = max(0.0, raw_bal_c - open_stake_c)
 
+    raw_bal_live = wallets.get(4, {}).get('balance', 6.34)
+    open_stake_live = open_stats.get(4, {}).get('open_stake', 0.0)
+    open_count_live = open_stats.get(4, {}).get('open_count', 0)
+    active_bal_live = max(0.0, raw_bal_live - open_stake_live)
+
     return {
         "bot_a": {
             "balance": f"${active_bal_a:.2f}",
@@ -196,6 +223,17 @@ def get_dashboard_data():
             "rate": f"{rate_c:.1f}%",
             "streak": streak_c,
             "pnl": f"{pnl_c:+.2f}"
+        },
+        "live_bot": {
+            "balance": f"${active_bal_live:.2f}",
+            "settled_balance": f"${raw_bal_live:.2f}",
+            "open_stake": round(open_stake_live, 2),
+            "open_count": open_count_live,
+            "wins": wins_live,
+            "losses": loss_live,
+            "rate": f"{rate_live:.1f}%",
+            "streak": streak_live,
+            "pnl": f"{pnl_live:+.2f}"
         },
         "trades": trades,
         "server_time": datetime.datetime.now().strftime("%H:%M:%S")

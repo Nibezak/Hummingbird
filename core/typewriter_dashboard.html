@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HUMMINGBIRD TERMINAL</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    :root {
+      --bg-main: #08090a;
+      --bg-card: #0e1013;
+      --bg-hover: #13161c;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --border-color: #262a33;
+      --border-dashed: #333842;
+      --select-bg: #08090a;
+      --btn-hover-bg: #f8fafc;
+      --btn-hover-text: #08090a;
+      --scrollbar-thumb: #262a33;
+    }
+
+    body.light-theme {
+      --bg-main: #f5f4ef;
+      --bg-card: #ffffff;
+      --bg-hover: #eae8e1;
+      --text-main: #111418;
+      --text-muted: #555e6c;
+      --text-dim: #798394;
+      --border-color: #cfd5de;
+      --border-dashed: #b8c0cc;
+      --select-bg: #ffffff;
+      --btn-hover-bg: #111418;
+      --btn-hover-text: #ffffff;
+      --scrollbar-thumb: #cbd5e1;
+    }
+
+    body {
+      font-family: 'Courier New', Courier, monospace;
+      letter-spacing: -0.02em;
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      transition: background-color 0.2s ease, color 0.2s ease;
+    }
+
+    .cursor-blink {
+      animation: blink 1s step-end infinite;
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+
+    .box-card {
+      border: 1px solid var(--border-color);
+      background-color: var(--bg-card);
+      transition: background-color 0.2s ease, border-color 0.2s ease;
+    }
+
+    .dashed-bottom {
+      border-bottom: 1px dashed var(--border-dashed);
+    }
+
+    .border-b-theme {
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .border-t-theme {
+      border-top: 1px solid var(--border-color);
+    }
+
+    /* Sleek Typewriter Dropdown */
+    .typewriter-select {
+      background-color: var(--select-bg);
+      color: var(--text-main);
+      border: 1px solid var(--border-dashed);
+      padding: 4px 24px 4px 8px;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 11px;
+      border-radius: 0px;
+      appearance: none;
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%228%22%20height%3D%225%22%20viewBox%3D%220%200%208%205%22%3E%3Cpolygon%20points%3D%220%2C0%208%2C0%204%2C5%22%20fill%3D%22%23798394%22%2F%3E%3C%2Fsvg%3E");
+      background-repeat: no-repeat;
+      background-position: right 8px center;
+      cursor: pointer;
+      transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+    }
+    .typewriter-select:focus {
+      outline: none;
+      border-color: var(--text-main);
+    }
+    .typewriter-select option {
+      background-color: var(--bg-card);
+      color: var(--text-main);
+      font-family: 'Courier New', Courier, monospace;
+      padding: 4px;
+    }
+
+    .page-btn {
+      cursor: pointer;
+      padding: 2px 6px;
+      border: 1px solid var(--border-dashed);
+      background-color: var(--select-bg);
+      color: var(--text-main);
+      font-family: 'Courier New', Courier, monospace;
+      transition: all 0.15s ease;
+    }
+    .page-btn:hover:not(.disabled) {
+      background-color: var(--btn-hover-bg);
+      color: var(--btn-hover-text);
+      border-color: var(--text-main);
+    }
+    .page-btn.disabled {
+      opacity: 0.25;
+      cursor: not-allowed;
+    }
+
+    .table-hover-row:hover {
+      background-color: var(--bg-hover);
+    }
+
+    /* Scrollbar styling */
+    ::-webkit-scrollbar {
+      width: 4px;
+      height: 4px;
+    }
+    ::-webkit-scrollbar-track {
+      background: var(--bg-main);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: var(--scrollbar-thumb);
+    }
+  </style>
+</head>
+<body class="p-2 sm:p-4 antialiased selection:bg-[#798394] selection:text-white">
+  <div class="max-w-4xl mx-auto space-y-3 font-mono text-xs w-full">
+    
+    <!-- HEADER -->
+    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-baseline border-b-theme pb-1.5 gap-1 text-xs">
+      <div>
+        <span class="font-bold tracking-tight text-[13px]">HUMMINGBIRD</span>
+      </div>
+      <div class="text-right text-[11px] w-full sm:w-auto flex justify-between sm:justify-end items-center gap-2" style="color: var(--text-muted)">
+        <div class="flex items-center gap-1.5">
+          <span>STATUS: <span class="font-bold" style="color: var(--text-main)">CONNECTED</span> · <span id="clock">--:--:--</span></span>
+          <span class="cursor-blink font-bold" style="color: var(--text-main)">_</span>
+        </div>
+        <div class="flex items-center gap-1">
+          <!-- Sound Toggle Button -->
+          <button id="sound-toggle" class="page-btn text-[10px] font-bold tracking-wider" title="Toggle Trade & Loss Sounds">[SOUND: ON]</button>
+          <!-- Theme Toggle Button -->
+          <button id="theme-toggle" class="page-btn text-[10px] font-bold tracking-wider" title="Toggle Light/Dark Mode">[MODE: DARK]</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- BOT SUMMARY CARDS -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
+      
+      <!-- BOT A -->
+      <div class="box-card p-2.5">
+        <div class="flex justify-between items-center dashed-bottom pb-1 mb-1.5">
+          <span class="font-bold tracking-tight text-[12px]">BOT A (HIGH SECURITY)</span>
+          <span class="text-[10px]" style="color: var(--text-muted)">T &le; 90s</span>
+        </div>
+        <div class="space-y-1">
+          <div class="flex justify-between items-baseline">
+            <span style="color: var(--text-muted)">BALANCE:</span>
+            <div class="text-right">
+              <span id="bal-a" class="font-bold text-sm" style="color: var(--text-main)">$10.00</span>
+              <span id="open-a" class="text-[10px] ml-1.5" style="color: var(--text-muted)"></span>
+            </div>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">NET PNL:</span>
+            <span id="pnl-a" class="font-bold" style="color: var(--text-main)">+$0.00 (+0.0%)</span>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">WIN RATE:</span>
+            <span id="rate-a">0W - 0L (0.0%)</span>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">STREAK:</span>
+            <span id="streak-a" class="font-bold" style="color: var(--text-main)">0 WINS IN A ROW</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- BOT B -->
+      <div class="box-card p-2.5">
+        <div class="flex justify-between items-center dashed-bottom pb-1 mb-1.5">
+          <span class="font-bold tracking-tight text-[12px]">BOT B (HIGH FREQUENCY)</span>
+          <span class="text-[10px]" style="color: var(--text-muted)">T &le; 90s</span>
+        </div>
+        <div class="space-y-1">
+          <div class="flex justify-between items-baseline">
+            <span style="color: var(--text-muted)">BALANCE:</span>
+            <div class="text-right">
+              <span id="bal-b" class="font-bold text-sm" style="color: var(--text-main)">$10.00</span>
+              <span id="open-b" class="text-[10px] ml-1.5" style="color: var(--text-muted)"></span>
+            </div>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">NET PNL:</span>
+            <span id="pnl-b" class="font-bold" style="color: var(--text-main)">+$0.00 (+0.0%)</span>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">WIN RATE:</span>
+            <span id="rate-b">0W - 0L (0.0%)</span>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">STREAK:</span>
+            <span id="streak-b" class="font-bold" style="color: var(--text-main)">0 WINS IN A ROW</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- BOT C -->
+      <div class="box-card p-2.5">
+        <div class="flex justify-between items-center dashed-bottom pb-1 mb-1.5">
+          <span class="font-bold tracking-tight text-[12px]">BOT C (ULTRA FREQUENCY)</span>
+          <span class="text-[10px]" style="color: var(--text-muted)">T &le; 120s</span>
+        </div>
+        <div class="space-y-1">
+          <div class="flex justify-between items-baseline">
+            <span style="color: var(--text-muted)">BALANCE:</span>
+            <div class="text-right">
+              <span id="bal-c" class="font-bold text-sm" style="color: var(--text-main)">$10.00</span>
+              <span id="open-c" class="text-[10px] ml-1.5" style="color: var(--text-muted)"></span>
+            </div>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">NET PNL:</span>
+            <span id="pnl-c" class="font-bold" style="color: var(--text-main)">+$0.00 (+0.0%)</span>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">WIN RATE:</span>
+            <span id="rate-c">0W - 0L (0.0%)</span>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">STREAK:</span>
+            <span id="streak-c" class="font-bold" style="color: var(--text-main)">0 WINS IN A ROW</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- LIVE BOT C (REAL MONEY) -->
+      <div class="box-card p-2.5" style="border: 1px solid #10b981;">
+        <div class="flex justify-between items-center dashed-bottom pb-1 mb-1.5" style="border-bottom: 1px dashed #10b981;">
+          <span class="font-bold tracking-tight text-[12px] text-emerald-600 dark:text-emerald-400">LIVE BOT C (REAL USDC)</span>
+          <span class="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">ON-CHAIN</span>
+        </div>
+        <div class="space-y-1">
+          <div class="flex justify-between items-baseline">
+            <span style="color: var(--text-muted)">BALANCE:</span>
+            <div class="text-right">
+              <span id="bal-live" class="font-bold text-sm text-emerald-600 dark:text-emerald-400">$6.34</span>
+              <span id="open-live" class="text-[10px] ml-1.5" style="color: var(--text-muted)"></span>
+            </div>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">NET PNL:</span>
+            <span id="pnl-live" class="font-bold text-emerald-600 dark:text-emerald-400">+$0.00 (+0.0%)</span>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">WIN RATE:</span>
+            <span id="rate-live">0W - 0L (0.0%)</span>
+          </div>
+          <div class="flex justify-between">
+            <span style="color: var(--text-muted)">STREAK:</span>
+            <span id="streak-live" class="font-bold" style="color: var(--text-main)">0 WINS IN A ROW</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- TYPEWRITER DROPDOWN FILTERS BAR -->
+    <div class="box-card p-2 sm:p-2.5 text-xs">
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3 items-center">
+        <!-- Asset Filter Dropdown -->
+        <div class="flex items-center space-x-2">
+          <label for="filter-asset" class="font-bold shrink-0 text-[11px]" style="color: var(--text-muted)">ASSET:</label>
+          <select id="filter-asset" class="typewriter-select w-full">
+            <option value="ALL">ALL ASSETS (7)</option>
+            <option value="BTC">BTC (BITCOIN)</option>
+            <option value="ETH">ETH (ETHEREUM)</option>
+            <option value="SOL">SOL (SOLANA)</option>
+            <option value="DOGE">DOGE (DOGECOIN)</option>
+            <option value="XRP">XRP (RIPPLE)</option>
+            <option value="BNB">BNB (BINANCE COIN)</option>
+            <option value="HYPE">HYPE (HYPERLIQUID)</option>
+          </select>
+        </div>
+
+        <!-- Bot Filter Dropdown -->
+        <div class="flex items-center space-x-2">
+          <label for="filter-bot" class="font-bold shrink-0 text-[11px]" style="color: var(--text-muted)">BOT:</label>
+          <select id="filter-bot" class="typewriter-select w-full">
+            <option value="ALL">ALL BOTS (A, B, C, LIVE)</option>
+            <option value="BOT A">BOT A (HIGH SECURITY - 90s)</option>
+            <option value="BOT B">BOT B (HIGH FREQUENCY - 90s)</option>
+            <option value="BOT C">BOT C (ULTRA FREQUENCY - 120s)</option>
+            <option value="LIVE BOT C">LIVE BOT C (REAL USDC)</option>
+          </select>
+        </div>
+
+        <!-- Outcome Filter Dropdown -->
+        <div class="flex items-center space-x-2">
+          <label for="filter-outcome" class="font-bold shrink-0 text-[11px]" style="color: var(--text-muted)">OUTCOME:</label>
+          <select id="filter-outcome" class="typewriter-select w-full">
+            <option value="ALL">ALL OUTCOMES</option>
+            <option value="WIN">WINS ONLY [WIN]</option>
+            <option value="LOSS">LOSSES ONLY [LOSS]</option>
+            <option value="OPEN">OPEN POSITIONS [OPEN]</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- TABLE HEADER BAR -->
+    <div class="pt-1 flex justify-between items-baseline text-[11px] border-b-theme pb-1">
+      <span class="font-bold tracking-tight">TRADE EXECUTION & SETTLEMENT HISTORY</span>
+      <span class="text-[10px]" style="color: var(--text-muted)">LIVE FEED (POLLING 1.5S)</span>
+    </div>
+
+    <!-- MINIMAL TYPEWRITER TABLE (RESPONSIVE) -->
+    <div class="overflow-x-auto min-h-[320px]">
+      <table class="w-full text-left text-[11px] border-collapse whitespace-nowrap sm:whitespace-normal">
+        <thead>
+          <tr class="border-b-theme" style="color: var(--text-muted)">
+            <th class="py-1 pr-2 font-normal">#</th>
+            <th class="py-1 pr-2 font-normal">TIME</th>
+            <th class="py-1 pr-2 font-normal">REM</th>
+            <th class="py-1 pr-2 font-normal">ASSET</th>
+            <th class="py-1 pr-2 font-normal">BOT</th>
+            <th class="py-1 pr-2 font-normal">DIR</th>
+            <th class="py-1 pr-2 font-normal">ASK</th>
+            <th class="py-1 pr-2 font-normal">STAKE</th>
+            <th class="py-1 pr-2 font-normal">PNL</th>
+            <th class="py-1 pr-2 font-normal">OUTCOME</th>
+            <th class="py-1 font-normal text-right">···</th>
+          </tr>
+        </thead>
+        <tbody id="trade-rows" class="divide-y divide-dashed" style="border-color: var(--border-color)">
+          <!-- Rendered via JavaScript -->
+        </tbody>
+      </table>
+    </div>
+
+    <!-- TYPEWRITER PAGINATION BAR -->
+    <div class="flex flex-wrap justify-between items-center gap-2 text-[11px] border-t-theme pt-2">
+      <div class="space-x-1">
+        <button id="btn-first" class="page-btn">[|&lt; FIRST]</button>
+        <button id="btn-prev" class="page-btn">[&lt; PREV]</button>
+      </div>
+      <div id="page-indicator" class="font-bold" style="color: var(--text-muted)">
+        PAGE 1 OF 1 (TOTAL 0 TRADES)
+      </div>
+      <div class="space-x-1">
+        <button id="btn-next" class="page-btn">[NEXT &gt;]</button>
+        <button id="btn-last" class="page-btn">[LAST &gt;|]</button>
+      </div>
+    </div>
+
+    <!-- FOOTER -->
+    <div class="pt-1.5 text-[10px] flex justify-end border-t-theme" style="color: var(--text-dim)">
+      <span id="last-ping">LAST SYNC: JUST NOW</span>
+    </div>
+
+  </div>
+
+  <!-- ON-CHAIN POLYGON AUDIT MODAL -->
+  <div id="audit-modal" class="fixed inset-0 bg-black/75 hidden items-center justify-center p-3 z-50">
+    <div class="box-card max-w-xl w-full p-4 space-y-3 font-mono text-xs shadow-2xl relative">
+      <div class="flex justify-between items-center dashed-bottom pb-1.5">
+        <span class="font-bold tracking-tight text-[12px]" id="modal-title">ORDER & ON-CHAIN POLYGON AUDIT</span>
+        <button id="modal-close" class="page-btn px-2 py-0.5 text-[10px] font-bold">[X CLOSE]</button>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+        <div>
+          <span style="color: var(--text-muted)">CYCLE & ASSET:</span>
+          <div id="modal-cycle" class="font-bold text-[12px]" style="color: var(--text-main)">--</div>
+        </div>
+        <div>
+          <span style="color: var(--text-muted)">PREDICTION TIME:</span>
+          <div id="modal-time" class="font-bold" style="color: var(--text-main)">--</div>
+        </div>
+        <div>
+          <span style="color: var(--text-muted)">SPOT vs STRIKE (GAP):</span>
+          <div id="modal-gap" class="font-mono font-bold" style="color: var(--text-main)">--</div>
+        </div>
+        <div>
+          <span style="color: var(--text-muted)">DIRECTION & FILL ASK:</span>
+          <div id="modal-dir-ask" class="font-bold" style="color: var(--text-main)">--</div>
+        </div>
+        <div>
+          <span style="color: var(--text-muted)">INVESTED STAKE / SHARES:</span>
+          <div id="modal-stake-shares" style="color: var(--text-main)">--</div>
+        </div>
+        <div>
+          <span style="color: var(--text-muted)">OUTCOME / PNL:</span>
+          <div id="modal-outcome-pnl" class="font-mono font-bold" style="color: var(--text-main)">--</div>
+        </div>
+      </div>
+
+      <div class="space-y-1 text-[11px] pt-1 border-t-theme">
+        <div class="flex justify-between text-[10px]" style="color: var(--text-muted)">
+          <span>POLYGON CTF CONTRACT:</span>
+          <span class="font-mono">0x4D97DCd97eC945f40cF65F87097ACe5EA0476045</span>
+        </div>
+        <div>
+          <div class="text-[10px] mb-0.5" style="color: var(--text-muted)">ERC-1155 CONTRACT TOKEN ID (POLYGON):</div>
+          <div id="modal-token-id" class="p-1.5 font-mono text-[9px] break-all border border-[#333842] select-all cursor-text" style="background-color: var(--select-bg); color: var(--text-main)">--</div>
+        </div>
+      </div>
+
+      <!-- DIRECT PROOF VERIFICATION ACTIONS -->
+      <div class="pt-2 flex flex-wrap gap-2 text-[11px] border-t-theme justify-between items-center">
+        <div class="flex flex-wrap gap-1.5">
+          <a id="modal-link-polygon" href="#" target="_blank" rel="noopener noreferrer" class="page-btn text-[10px] inline-flex items-center gap-1 font-bold">
+            [VIEW TOKEN ON POLYGONSCAN ↗]
+          </a>
+          <a id="modal-link-clob" href="#" target="_blank" rel="noopener noreferrer" class="page-btn text-[10px] inline-flex items-center gap-1 font-bold">
+            [CLOB ORDERBOOK & BIDS ↗]
+          </a>
+          <a id="modal-link-poly" href="#" target="_blank" rel="noopener noreferrer" class="page-btn text-[10px] inline-flex items-center gap-1 font-bold">
+            [POLYMARKET EVENT ↗]
+          </a>
+        </div>
+        <button id="modal-btn-close" class="page-btn text-[10px] px-2 py-0.5">[ESC]</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_URL = '/data';
+    const PAGE_SIZE = 12;
+
+    let allTrades = [];
+    let currentPage = 1;
+
+    let filters = {
+      asset: 'ALL',
+      bot: 'ALL',
+      outcome: 'ALL'
+    };
+
+    let currentSummary = {
+      bot_a: { balance: '$10.00', pnl: '+$0.00', wins: 0, losses: 0, rate: '0.0%', streak: 0 },
+      bot_b: { balance: '$10.00', pnl: '+$0.00', wins: 0, losses: 0, rate: '0.0%', streak: 0 },
+      bot_c: { balance: '$10.00', pnl: '+$0.00', wins: 0, losses: 0, rate: '0.0%', streak: 0 },
+      live_bot: { balance: '$6.34', pnl: '+$0.00', wins: 0, losses: 0, rate: '0.0%', streak: 0 }
+    };
+
+    // Tracking for Audio Triggers
+    let initialDataLoaded = false;
+    let seenTradeIds = new Set();
+    let seenLossIds = new Set();
+
+    // --- AUDIO NOTIFICATIONS (SYNTHETIC WEB AUDIO API) ---
+    let audioCtx = null;
+    let isMuted = localStorage.getItem('hummingbird_sound') === 'muted';
+
+    function getAudioCtx() {
+      if (!audioCtx) {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (AudioContext) {
+          audioCtx = new AudioContext();
+        }
+      }
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+      return audioCtx;
+    }
+
+    document.addEventListener('click', () => {
+      getAudioCtx();
+    }, { once: false });
+
+    const soundToggleBtn = document.getElementById('sound-toggle');
+    function updateSoundBtn() {
+      soundToggleBtn.textContent = isMuted ? '[SOUND: MUTED]' : '[SOUND: ON]';
+      soundToggleBtn.style.opacity = isMuted ? '0.6' : '1';
+    }
+    updateSoundBtn();
+
+    soundToggleBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      isMuted = !isMuted;
+      localStorage.setItem('hummingbird_sound', isMuted ? 'muted' : 'on');
+      updateSoundBtn();
+      if (!isMuted) {
+        playNewTradeSound();
+      }
+    });
+
+    // 1. Satisfying New Trade Entry Chime
+    function playNewTradeSound() {
+      if (isMuted) return;
+      try {
+        const ctx = getAudioCtx();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+
+        const osc1 = ctx.createOscillator();
+        const gain1 = ctx.createGain();
+        osc1.type = 'sine';
+        osc1.frequency.setValueAtTime(1318.51, now); // E6
+        osc1.frequency.exponentialRampToValueAtTime(1760.00, now + 0.08); // A6
+        gain1.gain.setValueAtTime(0.16, now);
+        gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+        osc1.connect(gain1);
+        gain1.connect(ctx.destination);
+
+        const osc2 = ctx.createOscillator();
+        const gain2 = ctx.createGain();
+        osc2.type = 'triangle';
+        osc2.frequency.setValueAtTime(659.25, now); // E5
+        osc2.frequency.setValueAtTime(880.00, now + 0.08); // A5
+        gain2.gain.setValueAtTime(0.12, now);
+        gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+        osc2.connect(gain2);
+        gain2.connect(ctx.destination);
+
+        osc1.start(now);
+        osc2.start(now);
+        osc1.stop(now + 0.35);
+        osc2.stop(now + 0.45);
+      } catch (err) {
+        console.warn("Audio chime error:", err);
+      }
+    }
+
+    // 2. Retro 8-bit Arcade Game Over Sound (Strictly on losses)
+    function playLossSound() {
+      if (isMuted) return;
+      try {
+        const ctx = getAudioCtx();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+
+        const notes = [
+          { f: 392.00, start: 0.00, dur: 0.13 }, // G4
+          { f: 369.99, start: 0.13, dur: 0.13 }, // F#4
+          { f: 349.23, start: 0.26, dur: 0.13 }, // F4
+          { f: 246.94, start: 0.39, dur: 0.45 }  // B3 downward slide
+        ];
+
+        notes.forEach(n => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(n.f, now + n.start);
+          if (n.start >= 0.39) {
+            osc.frequency.exponentialRampToValueAtTime(110.00, now + n.start + n.dur);
+          }
+          gain.gain.setValueAtTime(0.20, now + n.start);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + n.start + n.dur);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(now + n.start);
+          osc.stop(now + n.start + n.dur);
+        });
+      } catch (err) {
+        console.warn("Audio loss error:", err);
+      }
+    }
+
+    // --- THEME MANAGEMENT ---
+    const themeToggleBtn = document.getElementById('theme-toggle');
+    function applyTheme(theme) {
+      if (theme === 'light') {
+        document.body.classList.add('light-theme');
+        themeToggleBtn.textContent = '[MODE: LIGHT]';
+      } else {
+        document.body.classList.remove('light-theme');
+        themeToggleBtn.textContent = '[MODE: DARK]';
+      }
+    }
+
+    const savedTheme = localStorage.getItem('hummingbird_theme') || 'dark';
+    applyTheme(savedTheme);
+
+    themeToggleBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isCurrentlyLight = document.body.classList.contains('light-theme');
+      const newTheme = isCurrentlyLight ? 'dark' : 'light';
+      localStorage.setItem('hummingbird_theme', newTheme);
+      applyTheme(newTheme);
+    });
+
+    // --- DROPDOWN FILTERS ---
+    const selectAsset = document.getElementById('filter-asset');
+    const selectBot = document.getElementById('filter-bot');
+    const selectOutcome = document.getElementById('filter-outcome');
+
+    selectAsset.addEventListener('change', (e) => {
+      filters.asset = e.target.value;
+      currentPage = 1;
+      renderTrades();
+    });
+
+    selectBot.addEventListener('change', (e) => {
+      filters.bot = e.target.value;
+      currentPage = 1;
+      renderTrades();
+    });
+
+    selectOutcome.addEventListener('change', (e) => {
+      filters.outcome = e.target.value;
+      currentPage = 1;
+      renderTrades();
+    });
+
+    // --- PAGINATION ---
+    document.getElementById('btn-first').addEventListener('click', () => {
+      if (currentPage > 1) { currentPage = 1; renderTrades(); }
+    });
+    document.getElementById('btn-prev').addEventListener('click', () => {
+      if (currentPage > 1) { currentPage--; renderTrades(); }
+    });
+    document.getElementById('btn-next').addEventListener('click', () => {
+      const filtered = getFilteredTrades();
+      const maxPage = Math.ceil(filtered.length / PAGE_SIZE) || 1;
+      if (currentPage < maxPage) { currentPage++; renderTrades(); }
+    });
+    document.getElementById('btn-last').addEventListener('click', () => {
+      const filtered = getFilteredTrades();
+      const maxPage = Math.ceil(filtered.length / PAGE_SIZE) || 1;
+      if (currentPage < maxPage) { currentPage = maxPage; renderTrades(); }
+    });
+
+    function getFilteredTrades() {
+      return allTrades.filter(t => {
+        if (filters.asset !== 'ALL' && t.asset !== filters.asset) return false;
+        if (filters.bot !== 'ALL' && t.bot !== filters.bot) return false;
+        if (filters.outcome !== 'ALL') {
+          if (filters.outcome === 'WIN' && t.outcome !== 'WIN') return false;
+          if (filters.outcome === 'LOSS' && t.outcome !== 'LOSS') return false;
+          if (filters.outcome === 'OPEN' && t.outcome !== 'OPEN') return false;
+        }
+        return true;
+      });
+    }
+
+    function renderSummary() {
+      const now = new Date();
+      document.getElementById('clock').textContent = now.toTimeString().split(' ')[0];
+
+      // Bot A
+      document.getElementById('bal-a').textContent = currentSummary.bot_a.balance;
+      const openA = currentSummary.bot_a.open_stake || 0;
+      const countA = currentSummary.bot_a.open_count || 0;
+      const openElA = document.getElementById('open-a');
+      if (openElA) {
+        openElA.textContent = openA > 0 ? `(-$${openA.toFixed(2)} in ${countA} open)` : '';
+      }
+      const numPnlA = parseFloat(String(currentSummary.bot_a.pnl).replace(/[^0-9.-]/g, '')) || 0;
+      const signA = numPnlA >= 0 ? '+' : '';
+      const pctA = ((numPnlA / 10.00) * 100).toFixed(1);
+      document.getElementById('pnl-a').textContent = `${signA}$${Math.abs(numPnlA).toFixed(2)} (+${pctA}%)`;
+      document.getElementById('rate-a').textContent = `${currentSummary.bot_a.wins}W - ${currentSummary.bot_a.losses}L (${currentSummary.bot_a.rate})`;
+      document.getElementById('streak-a').textContent = currentSummary.bot_a.streak + " WINS IN A ROW";
+
+      // Bot B
+      document.getElementById('bal-b').textContent = currentSummary.bot_b.balance;
+      const openB = currentSummary.bot_b.open_stake || 0;
+      const countB = currentSummary.bot_b.open_count || 0;
+      const openElB = document.getElementById('open-b');
+      if (openElB) {
+        openElB.textContent = openB > 0 ? `(-$${openB.toFixed(2)} in ${countB} open)` : '';
+      }
+      const numPnlB = parseFloat(String(currentSummary.bot_b.pnl).replace(/[^0-9.-]/g, '')) || 0;
+      const signB = numPnlB >= 0 ? '+' : '';
+      const pctB = ((numPnlB / 10.00) * 100).toFixed(1);
+      document.getElementById('pnl-b').textContent = `${signB}$${Math.abs(numPnlB).toFixed(2)} (+${pctB}%)`;
+      document.getElementById('rate-b').textContent = `${currentSummary.bot_b.wins}W - ${currentSummary.bot_b.losses}L (${currentSummary.bot_b.rate})`;
+      document.getElementById('streak-b').textContent = currentSummary.bot_b.streak + " WINS IN A ROW";
+
+      // Bot C
+      if (currentSummary.bot_c) {
+        document.getElementById('bal-c').textContent = currentSummary.bot_c.balance;
+        const openC = currentSummary.bot_c.open_stake || 0;
+        const countC = currentSummary.bot_c.open_count || 0;
+        const openElC = document.getElementById('open-c');
+        if (openElC) {
+          openElC.textContent = openC > 0 ? `(-$${openC.toFixed(2)} in ${countC} open)` : '';
+        }
+        const numPnlC = parseFloat(String(currentSummary.bot_c.pnl).replace(/[^0-9.-]/g, '')) || 0;
+        const signC = numPnlC >= 0 ? '+' : '';
+        const pctC = ((numPnlC / 10.00) * 100).toFixed(1);
+        document.getElementById('pnl-c').textContent = `${signC}$${Math.abs(numPnlC).toFixed(2)} (+${pctC}%)`;
+        document.getElementById('rate-c').textContent = `${currentSummary.bot_c.wins}W - ${currentSummary.bot_c.losses}L (${currentSummary.bot_c.rate})`;
+        document.getElementById('streak-c').textContent = currentSummary.bot_c.streak + " WINS IN A ROW";
+      }
+
+      // Live Bot C (Real Money)
+      if (currentSummary.live_bot) {
+        const liveBalEl = document.getElementById('bal-live');
+        if (liveBalEl) liveBalEl.textContent = currentSummary.live_bot.balance;
+        const openLive = currentSummary.live_bot.open_stake || 0;
+        const countLive = currentSummary.live_bot.open_count || 0;
+        const openElLive = document.getElementById('open-live');
+        if (openElLive) {
+          openElLive.textContent = openLive > 0 ? `(-$${openLive.toFixed(2)} in ${countLive} open)` : '';
+        }
+        const numPnlLive = parseFloat(String(currentSummary.live_bot.pnl).replace(/[^0-9.-]/g, '')) || 0;
+        const signLive = numPnlLive >= 0 ? '+' : '';
+        const pctLive = ((numPnlLive / 6.34) * 100).toFixed(1);
+        const pnlElLive = document.getElementById('pnl-live');
+        if (pnlElLive) pnlElLive.textContent = `${signLive}$${Math.abs(numPnlLive).toFixed(2)} (${signLive}${pctLive}%)`;
+        const rateElLive = document.getElementById('rate-live');
+        if (rateElLive) rateElLive.textContent = `${currentSummary.live_bot.wins}W - ${currentSummary.live_bot.losses}L (${currentSummary.live_bot.rate})`;
+        const streakElLive = document.getElementById('streak-live');
+        if (streakElLive) streakElLive.textContent = currentSummary.live_bot.streak + " WINS IN A ROW";
+      }
+    }
+
+    function renderTrades() {
+      const filtered = getFilteredTrades();
+      const totalCount = filtered.length;
+      const maxPage = Math.ceil(totalCount / PAGE_SIZE) || 1;
+      
+      if (currentPage > maxPage) currentPage = maxPage;
+      if (currentPage < 1) currentPage = 1;
+
+      document.getElementById('page-indicator').textContent = `PAGE ${currentPage} OF ${maxPage} (${totalCount} TRADES)`;
+      
+      const btnFirst = document.getElementById('btn-first');
+      const btnPrev = document.getElementById('btn-prev');
+      const btnNext = document.getElementById('btn-next');
+      const btnLast = document.getElementById('btn-last');
+
+      if (currentPage === 1) {
+        btnFirst.classList.add('disabled');
+        btnPrev.classList.add('disabled');
+      } else {
+        btnFirst.classList.remove('disabled');
+        btnPrev.classList.remove('disabled');
+      }
+
+      if (currentPage === maxPage) {
+        btnNext.classList.add('disabled');
+        btnLast.classList.add('disabled');
+      } else {
+        btnNext.classList.remove('disabled');
+        btnLast.classList.remove('disabled');
+      }
+
+      const startIdx = (currentPage - 1) * PAGE_SIZE;
+      const pageRows = filtered.slice(startIdx, startIdx + PAGE_SIZE);
+
+      const tbody = document.getElementById('trade-rows');
+      if (pageRows.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="11" class="py-6 text-center italic" style="color: var(--text-muted)">NO TRADES MATCHING CURRENT FILTERS</td></tr>`;
+        return;
+      }
+
+      let html = '';
+      pageRows.forEach(t => {
+        const isWin = t.outcome === 'WIN';
+        const isLoss = t.outcome === 'LOSS';
+        const outcomeClass = isWin ? 'font-bold' : (isLoss ? 'underline text-[#dc2626]' : 'italic');
+        const pnlClass = isWin ? 'font-bold' : (isLoss ? 'text-[#dc2626]' : '');
+        const polyUrl = t.url || `https://polymarket.com/event/${(t.asset||'btc').toLowerCase()}-updown-5m`;
+
+        html += `
+          <tr class="table-hover-row cursor-pointer transition-colors" onclick="window.open('${polyUrl}', '_blank', 'noopener,noreferrer')" title="Click row to open ${t.asset} market on Polymarket">
+            <td class="py-1 pr-2" style="color: var(--text-muted)">${t.id}</td>
+            <td class="py-1 pr-2" style="color: var(--text-muted)">${t.time}</td>
+            <td class="py-1 pr-2 font-mono" style="color: var(--text-muted)">${t.remaining ? t.remaining + 's' : '--'}</td>
+            <td class="py-1 pr-2 font-bold" style="color: var(--text-main)">
+              <span class="inline-flex items-center gap-1 hover:underline">
+                ${t.asset} <span class="text-[9px] opacity-70">↗</span>
+              </span>
+            </td>
+            <td class="py-1 pr-2">${t.bot}</td>
+            <td class="py-1 pr-2">${t.direction}</td>
+            <td class="py-1 pr-2">${t.entry}</td>
+            <td class="py-1 pr-2">${t.stake}</td>
+            <td class="py-1 pr-2 font-mono ${pnlClass}">${t.pnl}</td>
+            <td class="py-1 pr-2 font-mono ${outcomeClass}">[${t.outcome}]</td>
+            <td class="py-1 text-right">
+              <button class="page-btn text-[10px] px-1.5 py-0 font-bold" onclick="openAuditModal(event, ${t.id})" title="View On-Chain Polygon & Orderbook Proof">···</button>
+            </td>
+          </tr>
+        `;
+      });
+      tbody.innerHTML = html;
+    }
+
+    // --- MODAL FUNCTIONS ---
+    const modal = document.getElementById('audit-modal');
+    function openAuditModal(e, tradeId) {
+      if (e) e.stopPropagation();
+      const trade = allTrades.find(t => t.id === tradeId);
+      if (!trade) return;
+
+      document.getElementById('modal-title').textContent = `ORDER & ON-CHAIN POLYGON AUDIT [TRADE #${trade.id}]`;
+      document.getElementById('modal-cycle').textContent = `${trade.asset} 5M (Cycle #${trade.cycle_id})`;
+      document.getElementById('modal-time').textContent = `${trade.time} UTC (T-${trade.remaining}s)`;
+      document.getElementById('modal-gap').textContent = `${trade.spot} vs ${trade.strike} (${trade.gap})`;
+      document.getElementById('modal-dir-ask').textContent = `${trade.direction} @ ${trade.entry}`;
+      document.getElementById('modal-stake-shares').textContent = `${trade.stake} (${trade.shares} shares)`;
+      document.getElementById('modal-outcome-pnl').textContent = `${trade.outcome} (${trade.pnl})`;
+      document.getElementById('modal-token-id').textContent = trade.token_id || 'Generating / Resolving...';
+
+      // Update action links
+      const polyLink = document.getElementById('modal-link-polygon');
+      if (trade.polygonscan_url) {
+        polyLink.href = trade.polygonscan_url;
+        polyLink.classList.remove('disabled');
+      } else {
+        polyLink.href = '#';
+        polyLink.classList.add('disabled');
+      }
+
+      const clobLink = document.getElementById('modal-link-clob');
+      if (trade.clob_url) {
+        clobLink.href = trade.clob_url;
+        clobLink.classList.remove('disabled');
+      } else {
+        clobLink.href = '#';
+        clobLink.classList.add('disabled');
+      }
+
+      const marketLink = document.getElementById('modal-link-poly');
+      marketLink.href = trade.url || '#';
+
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function closeAuditModal() {
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+
+    document.getElementById('modal-close').addEventListener('click', closeAuditModal);
+    document.getElementById('modal-btn-close').addEventListener('click', closeAuditModal);
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) closeAuditModal();
+    });
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !modal.classList.contains('hidden')) {
+        closeAuditModal();
+      }
+    });
+
+    // --- LIVE POLLING ---
+    async function fetchLive() {
+      try {
+        const res = await fetch(API_URL, { cache: 'no-store' });
+        if (res.ok) {
+          const json = await res.json();
+          currentSummary.bot_a = json.bot_a;
+          currentSummary.bot_b = json.bot_b;
+          currentSummary.bot_c = json.bot_c;
+          currentSummary.live_bot = json.live_bot;
+          allTrades = json.trades || [];
+
+          // Audio Trigger Logic: New trades or losses
+          if (initialDataLoaded) {
+            const incomingNewTrades = allTrades.filter(t => !seenTradeIds.has(t.id));
+            if (incomingNewTrades.length > 0) {
+              playNewTradeSound();
+            }
+
+            allTrades.forEach(t => {
+              if (t.outcome === 'LOSS' && !seenLossIds.has(t.id)) {
+                seenLossIds.add(t.id);
+                playLossSound();
+              }
+            });
+          }
+
+          allTrades.forEach(t => {
+            seenTradeIds.add(t.id);
+            if (t.outcome === 'LOSS') {
+              seenLossIds.add(t.id);
+            }
+          });
+          initialDataLoaded = true;
+
+          renderSummary();
+          renderTrades();
+          document.getElementById('last-ping').textContent = 'LAST SYNC: ' + json.server_time;
+        }
+      } catch (e) {
+        document.getElementById('last-ping').textContent = 'SYNCING...';
+      }
+    }
+
+    // Initial render & 1.5s real-time poll
+    renderSummary();
+    renderTrades();
+    fetchLive();
+    setInterval(fetchLive, 1500);
+  </script>
+</body>
+</html>
