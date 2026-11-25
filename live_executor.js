@@ -8,6 +8,14 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const http = require('http');
+
+// Persistent Keep-Alive agent to eliminate repeated 300ms TCP/TLS handshake latency
+const keepAliveAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 25,
+  keepAliveMsecs: 60000
+});
 
 const weatherDir = 'c:\\projects\\weather';
 const envPath = path.resolve(weatherDir, '.env');
@@ -39,7 +47,7 @@ let cachedClient = null;
 
 function httpGetJson(url) {
   return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 3000 }, (res) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, agent: keepAliveAgent, timeout: 3000 }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
@@ -194,7 +202,7 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
   const {
     maxAcceptablePrice = 0.98,
     maxRetries = 3,
-    retryDelayMs = 150,
+    retryDelayMs = 15,
     asset = null,
     strikePrice = null,
     minSafeGap = null,
@@ -344,10 +352,60 @@ async function main() {
       expectedPrice
     });
     console.log(JSON.stringify(res, null, 2));
+  } else if (action === 'server') {
+    const port = parseInt(args[1] || '8897', 10);
+    startExecutionServer(port);
   } else {
     console.error(JSON.stringify({ error: `Unknown action: ${action}` }));
     process.exit(1);
   }
+}
+
+function startExecutionServer(port = 8897) {
+  console.log(`[PRE-WARMED EXECUTOR] Initializing and pre-authenticating ClobClient...`);
+  getClient().then(() => {
+    console.log(`[PRE-WARMED EXECUTOR] ClobClient ready and authenticated with keep-alive.`);
+  }).catch(err => {
+    console.error(`[PRE-WARMED EXECUTOR] Warning during client pre-warm: ${err.message}`);
+  });
+
+  const server = http.createServer(async (req, res) => {
+    if (req.method === 'POST' && req.url === '/chaser') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', async () => {
+        const tStart = Date.now();
+        try {
+          const payload = JSON.parse(body || '{}');
+          const tokenID = payload.tokenID;
+          const amountUSD = parseFloat(payload.amountUSD || '1.00');
+          const options = payload.options || {};
+          
+          console.log(`\n[SERVER DISPATCH] Immediate trade request for Token ${tokenID} ($${amountUSD})...`);
+          const result = await executeMarketBuyWithChaser(tokenID, amountUSD, options);
+          const duration = Date.now() - tStart;
+          console.log(`[SERVER DISPATCH COMPLETED] Execution duration: ${duration}ms | Success: ${result.success}`);
+          
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[SERVER DISPATCH ERROR] ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+      });
+    } else if (req.method === 'GET' && req.url === '/ping') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ready', time: Date.now() }));
+    } else {
+      res.writeHead(404);
+      res.end('Not Found');
+    }
+  });
+
+  server.listen(port, '127.0.0.1', () => {
+    console.log(`[PRE-WARMED EXECUTOR SERVER] Ultra-low latency engine listening on http://127.0.0.1:${port}`);
+  });
 }
 
 if (require.main === module) {
@@ -357,4 +415,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { getBalance, fetchOrderBook, fetchBinanceSpot, executeMarketBuy, executeMarketBuyWithChaser };
+module.exports = { getBalance, fetchOrderBook, fetchBinanceSpot, executeMarketBuy, executeMarketBuyWithChaser, startExecutionServer };

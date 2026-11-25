@@ -203,6 +203,49 @@ def resolve_settled_trades(conn):
         verdict = "WON!" if is_winner else "LOST (-100%)"
         print(f"\n[LIVE SETTLED {asset}] Trade #{t_id} (Cycle {cid}) | Prediction: {direction.upper()} | Winner: {winner.upper()} -> {verdict} | PnL: ${pnl:+.2f} | Bankroll: ${new_wallet:.2f}", flush=True)
 
+def execute_live_chaser(token_id, stake, max_price, retries, asset, strike, safe_gap, direction, opp_token_id, ask):
+    """
+    Ultra-low latency live order execution:
+    1. Dispatches directly via persistent pre-warmed executor server on port 8897 (<2ms dispatch, keep-alive TLS).
+    2. Seamlessly falls back to Node.js CLI process if server is offline.
+    """
+    try:
+        url = "http://127.0.0.1:8897/chaser"
+        payload = json.dumps({
+            "tokenID": str(token_id),
+            "amountUSD": stake,
+            "options": {
+                "maxAcceptablePrice": max_price,
+                "maxRetries": retries,
+                "retryDelayMs": 15,  # Sub-20ms backoff
+                "asset": asset,
+                "strikePrice": strike,
+                "minSafeGap": safe_gap,
+                "direction": direction,
+                "oppTokenID": str(opp_token_id or ''),
+                "expectedPrice": ask
+            }
+        }).encode('utf-8')
+        req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            return json.loads(resp.read().decode('utf-8'))
+    except Exception as e:
+        cmd = [
+            'node', LIVE_EXECUTOR_PATH, 'chaser',
+            str(token_id),
+            str(stake),
+            str(max_price),
+            str(retries),
+            asset,
+            str(strike),
+            str(safe_gap),
+            direction,
+            str(opp_token_id or ''),
+            str(ask)
+        ]
+        exec_res = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
+        return parse_executor_output(exec_res.stdout)
+
 def evaluate_and_trade(conn):
     wallet_balance = get_wallet_balance(conn)
     if wallet_balance < MIN_STAKE_FLOOR:
@@ -290,24 +333,13 @@ def evaluate_and_trade(conn):
 
         print(f"\n[LIVE ORDER QUALIFIED] {cand['asset']} {cand['direction'].upper()} @ {cand['ask']*100:.1f}¢ | T-{cand['remaining']}s | Stake: ${stake:.2f} | Submitting on Polymarket CLOB...", flush=True)
 
-        cmd = [
-            'node', LIVE_EXECUTOR_PATH, 'chaser',
-            str(cand['token_id']),
-            str(stake),
-            str(MAX_ACCEPTABLE_ASK),
-            '3',
-            cand['asset'],
-            str(cand['strike']),
-            str(cand['safe_gap']),
-            cand['direction'].upper(),
-            str(cand.get('opp_token_id') or ''),
-            str(cand['ask'])
-        ]
+        parsed = execute_live_chaser(
+            cand['token_id'], stake, MAX_ACCEPTABLE_ASK, 3,
+            cand['asset'], cand['strike'], cand['safe_gap'],
+            cand['direction'].upper(), cand.get('opp_token_id'), cand['ask']
+        )
 
         try:
-            exec_res = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
-            parsed = parse_executor_output(exec_res.stdout)
-            
             if parsed and parsed.get('success'):
                 executed_ask = float(parsed.get('executedAsk') or cand['ask'])
                 shares = round(stake / executed_ask, 2)
