@@ -295,7 +295,7 @@ def evaluate_and_trade(conn):
             str(cand['token_id']),
             str(stake),
             str(MAX_ACCEPTABLE_ASK),
-            '3',
+            '5',
             cand['asset'],
             str(cand['strike']),
             str(cand['safe_gap']),

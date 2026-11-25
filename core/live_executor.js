@@ -183,8 +183,8 @@ async function executeMarketBuy(tokenID, amountUSD, maxAcceptablePrice = 0.94) {
 async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
   const {
     maxAcceptablePrice = 0.98,
-    maxRetries = 3,
-    retryDelayMs = 400,
+    maxRetries = 5,
+    retryDelayMs = 200,
     asset = null,
     strikePrice = null,
     minSafeGap = null,
@@ -210,27 +210,20 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
   while (attempt < maxRetries) {
     attempt++;
     const tStart = Date.now();
-    console.log(`\n[CHASER ATTEMPT ${attempt}/${maxRetries}] Checking live book for Token ${tokenID}...`);
+    console.log(`\n[CHASER ATTEMPT ${attempt}/${maxRetries}] Checking live book & market for Token ${tokenID}...`);
 
     // 1. Check live CLOB orderbook (both direct and synthetic complementary asks)
     const book = await fetchOrderBook(tokenID, oppTokenID);
-    const candidateAsk = book.bestAsk || expectedPrice;
+    const candidateAsk = book.bestAsk || expectedPrice || maxAcceptablePrice;
 
-    if (!candidateAsk) {
-      console.log(`[CHASER ${attempt}] Empty or unreadable orderbook. Retrying in ${retryDelayMs}ms...`);
-      history.push({ attempt, status: 'EMPTY_BOOK', latencyMs: Date.now() - tStart });
-      if (attempt < maxRetries) await new Promise(r => setTimeout(r, retryDelayMs));
-      continue;
-    }
-
-    // 2. Enforce price ceiling
-    if (candidateAsk > maxAcceptablePrice) {
-      console.log(`[CHASER ${attempt}] REJECTED: Best ask (${candidateAsk}c) exceeds ceiling (${maxAcceptablePrice}c). Kicking order out.`);
+    // 2. Enforce strict price ceiling (never buy at or above 99c)
+    if (book.bestAsk && book.bestAsk > maxAcceptablePrice) {
+      console.log(`[CHASER ${attempt}] REJECTED: Best ask (${book.bestAsk}c) exceeds ceiling (${maxAcceptablePrice}c). Kicking order out.`);
       return {
         success: false,
         reason: 'PRICE_CEILING_EXCEEDED',
         attempt,
-        bestAsk: candidateAsk,
+        bestAsk: book.bestAsk,
         maxAcceptablePrice,
         history
       };
@@ -259,35 +252,46 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
       }
     }
 
-    // 4. Submit FAK Market Order
+    // 4. Submit FAK Market Order with ceiling protection (maxAcceptablePrice = 0.98)
+    // By specifying price = maxAcceptablePrice, Polymarket matches the cheapest available ask
+    // (e.g. 83c if available, or sweeps up to 93c/98c if faster bots took the bottom tier).
     try {
-      const targetPrice = Math.min(candidateAsk, maxAcceptablePrice);
-      console.log(`[CHASER ${attempt}] Submitting FAK Buy @ ${targetPrice}c (Depth: $${book.askDepth})...`);
+      const ceilingPrice = maxAcceptablePrice;
+      const displayAsk = book.bestAsk || candidateAsk;
+      console.log(`[CHASER ${attempt}] Submitting Aggressive FAK Buy (Best Seen: ${displayAsk}c | Ceiling: ${ceilingPrice}c | Depth: $${book.askDepth})...`);
+      
       const marketOrder = await client.createMarketOrder({
         tokenID,
         side: clobPkg.Side.BUY,
         amount: amountUSD,
-        price: targetPrice,
+        price: ceilingPrice,
         orderType: clobPkg.OrderType.FAK
       });
 
       const result = await client.postOrder(marketOrder, clobPkg.OrderType.FAK);
       const isMatched = result && (result.status === 'matched' || result.takingAmount || result.success);
 
+      let executedPrice = displayAsk;
+      if (result && result.takingAmount && result.makingAmount && Number(result.takingAmount) > 0) {
+        executedPrice = Math.round((Number(result.makingAmount) / Number(result.takingAmount)) * 100) / 100;
+      } else if (book.bestAsk) {
+        executedPrice = book.bestAsk;
+      }
+
       history.push({
         attempt,
         status: isMatched ? 'FILLED' : 'PARTIAL_OR_UNFILLED',
-        bestAsk: targetPrice,
+        bestAsk: executedPrice,
         latencyMs: Date.now() - tStart,
         result
       });
 
       if (isMatched || result.orderID) {
-        console.log(`[CHASER ${attempt}] SUCCESS: Order matched at ~${targetPrice}c!`);
+        console.log(`[CHASER ${attempt}] SUCCESS: Order matched at ~${executedPrice}c!`);
         return {
           success: true,
           attempt,
-          executedAsk: targetPrice,
+          executedAsk: executedPrice,
           amountUSD,
           tokenID,
           result,
@@ -299,7 +303,7 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
       history.push({ attempt, status: 'ERROR', error: err.message, latencyMs: Date.now() - tStart });
     }
 
-    // Delay before next attempt
+    // Rapid retry delay (200ms) to catch shifted books before cycle ends
     if (attempt < maxRetries) {
       await new Promise(r => setTimeout(r, retryDelayMs));
     }
