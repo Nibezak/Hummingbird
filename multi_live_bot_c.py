@@ -344,10 +344,28 @@ def main():
     print(f"Price Bounds: {MIN_ACCEPTABLE_ASK*100:.0f}¢ <= Ask <= {MAX_ACCEPTABLE_ASK*100:.0f}¢ | Window: T-120s to T-15s", flush=True)
     print("==================================================================", flush=True)
 
+    last_heartbeat = 0
     while True:
         try:
             resolve_settled_trades(conn)
             evaluate_and_trade(conn)
+
+            now = time.time()
+            if now - last_heartbeat >= 60:
+                cur = conn.cursor()
+                cur.execute("SELECT balance FROM multi_wallet WHERE id = ?", (WALLET_ID,))
+                current_bal = cur.fetchone()[0]
+                cur.execute("SELECT COALESCE(SUM(invested_usd), 0) FROM multi_trades WHERE session_id = ? AND status = 'OPEN'", (CURRENT_SESSION,))
+                in_play = cur.fetchone()[0] or 0.0
+                cur.execute("SELECT COUNT(*), SUM(CASE WHEN is_winner=1 THEN 1 ELSE 0 END) FROM multi_trades WHERE session_id = ? AND status LIKE 'RESOLVED%'", (CURRENT_SESSION,))
+                tot, wins = cur.fetchone()
+                tot = tot or 0
+                wins = wins or 0
+                win_pct = (wins / tot * 100) if tot > 0 else 0.0
+                dt_str = datetime.datetime.now().strftime("%H:%M:%S")
+                print(f"[{dt_str}] LIVE BOT C HEARTBEAT | Real Bankroll: ${current_bal:.2f} (In-Play: ${in_play:.2f}) | Trades: {tot} | Wins: {wins} ({win_pct:.1f}%)", flush=True)
+                last_heartbeat = now
+
         except Exception as e:
             print(f"[LIVE LOOP ERROR] {str(e)}", flush=True)
         time.sleep(1.0)
