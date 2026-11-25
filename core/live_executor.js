@@ -57,29 +57,39 @@ function httpGetJson(url) {
 
 async function fetchOrderBook(tokenID, oppTokenID = null) {
   try {
-    const data = await httpGetJson(`https://clob.polymarket.com/book?token_id=${tokenID}`);
-    let asks = (data.asks || []).map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size), type: 'direct' }));
-    let bids = (data.bids || []).map(b => ({ price: parseFloat(b.price), size: parseFloat(b.size), type: 'direct' }));
+    const pDirect = httpGetJson(`https://clob.polymarket.com/book?token_id=${tokenID}`);
+    const pOpp = oppTokenID ? httpGetJson(`https://clob.polymarket.com/book?token_id=${oppTokenID}`) : Promise.resolve(null);
+    const [data, oppData] = await Promise.all([pDirect.catch(() => null), pOpp.catch(() => null)]);
 
-    // Traverse complementary synthetic asks from opposite token bids (1.0 - bid)
-    if (oppTokenID) {
-      try {
-        const oppData = await httpGetJson(`https://clob.polymarket.com/book?token_id=${oppTokenID}`);
-        for (const b of (oppData.bids || [])) {
-          const bp = parseFloat(b.price);
-          const bs = parseFloat(b.size);
-          const synPrice = Math.round((1.0 - bp) * 10000) / 10000;
-          if (synPrice > 0 && bs > 0) {
-            asks.push({ price: synPrice, size: bs, type: 'synthetic' });
-          }
-        }
-      } catch (err) {
-        // opposite book optional
+    let asks = [];
+    let bids = [];
+
+    if (data) {
+      for (const a of (data.asks || [])) {
+        const p = parseFloat(a.price);
+        const s = parseFloat(a.size);
+        if (p > 0 && s > 0) asks.push({ price: p, size: s, type: 'direct' });
+      }
+      for (const b of (data.bids || [])) {
+        const p = parseFloat(b.price);
+        const s = parseFloat(b.size);
+        if (p > 0 && s > 0) bids.push({ price: p, size: s, type: 'direct' });
       }
     }
 
-    asks = asks.filter(a => a.price > 0 && a.size > 0).sort((a, b) => a.price - b.price);
-    bids = bids.filter(b => b.price > 0 && b.size > 0).sort((a, b) => b.price - a.price);
+    if (oppData) {
+      for (const b of (oppData.bids || [])) {
+        const bp = parseFloat(b.price);
+        const bs = parseFloat(b.size);
+        const synPrice = Math.round((1.0 - bp) * 10000) / 10000;
+        if (synPrice > 0 && bs > 0) {
+          asks.push({ price: synPrice, size: bs, type: 'synthetic' });
+        }
+      }
+    }
+
+    asks.sort((a, b) => a.price - b.price);
+    bids.sort((a, b) => b.price - a.price);
 
     const bestAsk = asks.length > 0 ? asks[0].price : null;
     const bestBid = bids.length > 0 ? bids[0].price : null;
@@ -183,8 +193,8 @@ async function executeMarketBuy(tokenID, amountUSD, maxAcceptablePrice = 0.94) {
 async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
   const {
     maxAcceptablePrice = 0.98,
-    maxRetries = 5,
-    retryDelayMs = 200,
+    maxRetries = 3,
+    retryDelayMs = 150,
     asset = null,
     strikePrice = null,
     minSafeGap = null,
@@ -194,15 +204,6 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
   } = options;
 
   const client = await getClient();
-  const balInfo = await getBalance();
-  if (balInfo.balanceUSDC < amountUSD) {
-    return {
-      success: false,
-      reason: 'INSUFFICIENT_FUNDS',
-      balanceUSDC: balInfo.balanceUSDC,
-      amountUSD
-    };
-  }
 
   let attempt = 0;
   const history = [];
@@ -210,15 +211,15 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
   while (attempt < maxRetries) {
     attempt++;
     const tStart = Date.now();
-    console.log(`\n[CHASER ATTEMPT ${attempt}/${maxRetries}] Checking live book & market for Token ${tokenID}...`);
+    console.log(`\n[CHASER ATTEMPT ${attempt}/${maxRetries}] Checking live book for Token ${tokenID}...`);
 
-    // 1. Check live CLOB orderbook (both direct and synthetic complementary asks)
+    // 1. Parallel check of both direct and complementary synthetic orderbook
     const book = await fetchOrderBook(tokenID, oppTokenID);
     const candidateAsk = book.bestAsk || expectedPrice || maxAcceptablePrice;
 
-    // 2. Enforce strict price ceiling (never buy at or above 99c)
+    // 2. Strict ceiling check (never buy at or above 99c)
     if (book.bestAsk && book.bestAsk > maxAcceptablePrice) {
-      console.log(`[CHASER ${attempt}] REJECTED: Best ask (${book.bestAsk}c) exceeds ceiling (${maxAcceptablePrice}c). Kicking order out.`);
+      console.log(`[CHASER ${attempt}] REJECTED: Best ask (${book.bestAsk}c) exceeds ceiling (${maxAcceptablePrice}c).`);
       return {
         success: false,
         reason: 'PRICE_CEILING_EXCEEDED',
@@ -229,36 +230,13 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
       };
     }
 
-    // 3. Optional: Verify Binance spot price gap has not collapsed
-    if (asset && strikePrice && minSafeGap !== null) {
-      const spot = await fetchBinanceSpot(asset);
-      if (spot) {
-        const gap = spot - strikePrice;
-        const isUp = direction.toUpperCase() === 'UP';
-        const gapIntact = isUp ? (gap >= minSafeGap) : (gap <= minSafeGap);
-        if (!gapIntact) {
-          console.log(`[CHASER ${attempt}] ABORTED: Spot gap collapsed to ${gap.toFixed(2)} (Threshold: ${minSafeGap}). Protecting bankroll.`);
-          return {
-            success: false,
-            reason: 'SPOT_GAP_COLLAPSED',
-            attempt,
-            currentSpot: spot,
-            strikePrice,
-            currentGap: gap,
-            minSafeGap,
-            history
-          };
-        }
-      }
-    }
-
-    // 4. Submit FAK Market Order with ceiling protection (maxAcceptablePrice = 0.98)
-    // By specifying price = maxAcceptablePrice, Polymarket matches the cheapest available ask
-    // (e.g. 83c if available, or sweeps up to 93c/98c if faster bots took the bottom tier).
+    // 3. Submit FAK Market Order with ceiling protection (maxAcceptablePrice = 0.98)
+    // Polymarket automatically fills at the cheapest available price, but sweeps up to 0.98
+    // if the bottom tier was taken by faster bots.
     try {
       const ceilingPrice = maxAcceptablePrice;
       const displayAsk = book.bestAsk || candidateAsk;
-      console.log(`[CHASER ${attempt}] Submitting Aggressive FAK Buy (Best Seen: ${displayAsk}c | Ceiling: ${ceilingPrice}c | Depth: $${book.askDepth})...`);
+      console.log(`[CHASER ${attempt}] Submitting FAK Buy (Best: ${displayAsk}c | Ceiling: ${ceilingPrice}c | Depth: $${book.askDepth})...`);
       
       const marketOrder = await client.createMarketOrder({
         tokenID,
@@ -299,11 +277,11 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
         };
       }
     } catch (err) {
-      console.log(`[CHASER ${attempt}] Error submitting order: ${err.message}`);
+      console.log(`[CHASER ${attempt}] Order submission note: ${err.message}`);
       history.push({ attempt, status: 'ERROR', error: err.message, latencyMs: Date.now() - tStart });
     }
 
-    // Rapid retry delay (200ms) to catch shifted books before cycle ends
+    // Rapid retry delay (150ms)
     if (attempt < maxRetries) {
       await new Promise(r => setTimeout(r, retryDelayMs));
     }

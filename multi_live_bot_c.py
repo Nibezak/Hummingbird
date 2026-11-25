@@ -295,7 +295,7 @@ def evaluate_and_trade(conn):
             str(cand['token_id']),
             str(stake),
             str(MAX_ACCEPTABLE_ASK),
-            '5',
+            '3',
             cand['asset'],
             str(cand['strike']),
             str(cand['safe_gap']),
@@ -305,7 +305,7 @@ def evaluate_and_trade(conn):
         ]
 
         try:
-            exec_res = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            exec_res = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
             parsed = parse_executor_output(exec_res.stdout)
             
             if parsed and parsed.get('success'):
