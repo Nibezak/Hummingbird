@@ -116,12 +116,13 @@ def fetch_live_orderbook_fill(token_id, opp_token_id, target_stake_usd, cur=None
     if not asks and cur and cycle_id and asset and direction:
         col = "up_best_ask" if direction.lower() == "up" else "down_best_ask"
         dep_col = "up_ask_depth" if direction.lower() == "up" else "down_ask_depth"
+        now_ts = int(time.time())
         cur.execute(f"""
             SELECT {col}, {dep_col} 
             FROM multi_snapshots 
-            WHERE cycle_id = ? AND asset = ? AND {col} IS NOT NULL 
+            WHERE cycle_id = ? AND asset = ? AND {col} IS NOT NULL AND timestamp >= ?
             ORDER BY id DESC LIMIT 1
-        """, (cycle_id, asset))
+        """, (cycle_id, asset, now_ts - 3))
         db_row = cur.fetchone()
         if db_row and db_row[0]:
             db_ask = float(db_row[0])
