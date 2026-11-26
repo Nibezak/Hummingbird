@@ -75,8 +75,12 @@ def get_boundaries_for_asset(asset, remaining):
     return round(up_v * mult, 6), round(dn_v * mult, 6)
 
 def is_in_blackout_window():
-    # Backtest across 700 cycles proved 24/7 execution adds +37 trades (+1.51u EV) at 98.6% WR
-    return False
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    utc_minute = now_utc.hour * 60 + now_utc.minute
+    is_asian_fix = 230 <= utc_minute < 270   # 03:50 - 04:30 UTC (06:50 - 07:30 AM EAT)
+    is_nyse_bell = 865 <= utc_minute < 905   # 14:25 - 15:05 UTC (05:25 - 06:05 PM EAT)
+    is_eu_close = 980 <= utc_minute < 1000   # 16:20 - 16:40 UTC (07:20 - 07:40 PM EAT)
+    return is_asian_fix or is_nyse_bell or is_eu_close
 
 def get_wallet_balance(conn):
     cur = conn.cursor()
@@ -215,7 +219,7 @@ def fetch_books_via_daemon(token_ids):
     except Exception:
         return None
 
-def execute_live_chaser(token_id, stake, max_price, retries, asset, strike, safe_gap, direction, opp_token_id, ask, use_position_id=False, expected_depth=10.0):
+def execute_live_chaser(token_id, stake, max_price, retries, asset, strike, safe_gap, direction, opp_token_id, ask, use_position_id=False, expected_depth=10.0, cycle_id=None):
     """
     Ultra-low latency live order execution:
     1. Dispatches directly via persistent pre-warmed executor server on port 8897 (<2ms dispatch, keep-alive TLS).
@@ -232,6 +236,7 @@ def execute_live_chaser(token_id, stake, max_price, retries, asset, strike, safe
                 "maxRetries": retries,
                 "retryDelayMs": 15,  # Sub-20ms backoff
                 "asset": asset,
+                "cycleId": cycle_id,
                 "strikePrice": strike,
                 "minSafeGap": safe_gap,
                 "direction": direction,
@@ -261,6 +266,121 @@ def execute_live_chaser(token_id, stake, max_price, retries, asset, strike, safe
         ]
         exec_res = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
         return parse_executor_output(exec_res.stdout)
+
+_LAST_ARM_STATE = {'sig': None, 'ts': 0.0}
+
+def sync_and_arm_fast_executor(conn):
+    """Sync any sub-100ms WebSocket fills into SQLite and keep the Node WS engine armed for the current cycle."""
+    cur = conn.cursor()
+
+    # 1. Drain completed sub-100ms WS fills into multi_trades first
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8897/fast_fills", timeout=1.5) as resp:
+            fills = json.loads(resp.read().decode('utf-8')).get("fills", [])
+        if fills:
+            acked_ids = []
+            for f in fills:
+                cur.execute("SELECT trade_id FROM multi_trades WHERE cycle_id = ? AND asset = ? AND session_id = ?", (f['cycle_id'], f['asset'], CURRENT_SESSION))
+                if not cur.fetchone():
+                    rule_desc = (
+                        f"Bot C Sub-100ms WS {f['direction'].upper()} Gap {f['gap_dollars']:+,.4f} "
+                        f"| Direct {f['executed_ask']*100:.1f}¢ (Local {f['local_ms']}ms, Sign {f['sign_ms']}ms)"
+                    )
+                    with conn:
+                        conn.execute("""
+                            INSERT INTO multi_trades
+                            (cycle_id, asset, session_id, timestamp, call_time, direction, elapsed_seconds, remaining_seconds, spot_at_call, strike_price, gap_at_call, entry_price, shares, invested_usd, rule_triggered, status)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
+                        """, (f['cycle_id'], f['asset'], CURRENT_SESSION, f['timestamp'], f['call_time'], f['direction'],
+                              f['elapsed_seconds'], f['remaining_seconds'], f['spot_price'], f['strike_price'], f['gap_dollars'],
+                              f['executed_ask'], f['shares'], f['stake'], rule_desc))
+                    print(f"\n[LIVE BOT C SUB-100MS FILL RECORDED!] {f['asset']} {f['direction'].upper()} @ {f['executed_ask']*100:.1f}¢ | Stake: ${f['stake']:.2f} | Local: {f['local_ms']}ms (Sign: {f['sign_ms']}ms | CLOB: {f['post_ms']}ms)", flush=True)
+                acked_ids.append(f['fill_id'])
+            if acked_ids:
+                ack_req = urllib.request.Request(
+                    "http://127.0.0.1:8897/fast_fills_ack",
+                    data=json.dumps({"fill_ids": acked_ids}).encode('utf-8'),
+                    headers={'Content-Type': 'application/json'}
+                )
+                urllib.request.urlopen(ack_req, timeout=1.5).close()
+    except Exception:
+        pass
+
+    # 2. Push current cycle state + pre-computed boundaries to Node WS engine (~1s cadence or on state change)
+    wallet_balance = get_wallet_balance(conn)
+    cur.execute("SELECT COALESCE(SUM(invested_usd), 0) FROM multi_trades WHERE session_id = ? AND status = 'OPEN'", (CURRENT_SESSION,))
+    open_in_play = cur.fetchone()[0] or 0.0
+    available_cash = round(max(0.0, wallet_balance - open_in_play), 2)
+
+    cur.execute("""
+        SELECT cycle_id, asset, strike_price, up_token_id, down_token_id, condition_id
+        FROM multi_cycles
+        WHERE status = 'ACTIVE' AND strike_price IS NOT NULL
+    """)
+    cycles = cur.fetchall()
+    if not cycles:
+        return
+
+    cycle_id = int(cycles[0][0])
+    end_ts = cycle_id + 300
+    cur.execute("SELECT asset FROM multi_trades WHERE cycle_id = ? AND session_id = ?", (cycle_id, CURRENT_SESSION))
+    traded_keys = [f"{cycle_id}:{r[0]}" for r in cur.fetchall()]
+    blackout_active = is_in_blackout_window()
+
+    arm_sig = (cycle_id, len(cycles), available_cash, blackout_active, tuple(sorted(traded_keys)))
+    now = time.time()
+    if _LAST_ARM_STATE['sig'] == arm_sig and (now - _LAST_ARM_STATE['ts'] < 5.0):
+        return
+
+    assets_payload = []
+    for cid, asset, strike, up_tok, dn_tok, cond_id in cycles:
+        if cid != cycle_id or not strike:
+            continue
+        windows = {}
+        for rem_check in (120, 90, 60, 45, 30):
+            up_safe, dn_safe = get_boundaries_for_asset(asset, rem_check)
+            raw_up, raw_dn = get_raw_hf_boundaries(asset, rem_check)
+            windows[str(rem_check)] = {
+                "up_safe": up_safe,
+                "dn_safe": dn_safe,
+                "raw_up": raw_up,
+                "raw_dn": raw_dn
+            }
+        assets_payload.append({
+            "asset": asset,
+            "strike": float(strike),
+            "up_token_id": str(up_tok or ''),
+            "down_token_id": str(dn_tok or ''),
+            "use_pos_id": _is_v3_position_market(cond_id, up_tok, dn_tok),
+            "windows": windows
+        })
+
+    try:
+        arm_req = urllib.request.Request(
+            "http://127.0.0.1:8897/cycle_arm",
+            data=json.dumps({
+                "cycle_id": cycle_id,
+                "end_ts": int(end_ts),
+                "available_cash": available_cash,
+                "blackout_active": blackout_active,
+                "min_rem": MIN_REMAINING_SECONDS,
+                "max_rem": MAX_REMAINING_SECONDS,
+                "stake_fraction": STAKE_FRACTION,
+                "min_floor": MIN_STAKE_FLOOR,
+                "max_ceiling": MAX_STAKE_CEILING,
+                "strong_98c_threshold": STRONG_98C_THRESHOLD,
+                "min_ask": MIN_ACCEPTABLE_ASK,
+                "max_ask": MAX_ACCEPTABLE_ASK,
+                "traded_keys": traded_keys,
+                "assets": assets_payload
+            }).encode('utf-8'),
+            headers={'Content-Type': 'application/json'}
+        )
+        urllib.request.urlopen(arm_req, timeout=1.5).close()
+        _LAST_ARM_STATE['sig'] = arm_sig
+        _LAST_ARM_STATE['ts'] = now
+    except Exception:
+        pass
 
 def _is_v3_position_market(cond_id, up_tok, dn_tok):
     if cond_id and cond_id.startswith("0x01") and cond_id.endswith("000000000000000000000000"):
@@ -406,7 +526,7 @@ def evaluate_and_trade(conn):
                     execute_live_chaser,
                     cand['token_id'], stake, MAX_ACCEPTABLE_ASK, 3,
                     cand['asset'], cand['strike'], cand['safe_gap'],
-                    cand['direction'].upper(), cand.get('opp_token_id'), cand['ask'], cand['use_pos_id'], cand['depth']
+                    cand['direction'].upper(), cand.get('opp_token_id'), cand['ask'], cand['use_pos_id'], cand['depth'], cand['cycle_id']
                 )
             )
             for cand, stake in dispatches
@@ -449,13 +569,15 @@ def main():
     print(f"MULTI-ASSET LIVE BOT C (REAL USDC TRADING) ACTIVATED (RUN #{CURRENT_SESSION})", flush=True)
     print(f"Initial Bankroll: ${get_wallet_balance(conn):.2f} USDC | Stake Sizing: 20% (Min Floor: ${MIN_STAKE_FLOOR:.2f}, Max Cap: ${MAX_STAKE_CEILING:.2f})", flush=True)
     print(f"Execution Engine: Polymarket CLOB Taker with Adaptive Chaser & Verification", flush=True)
-    print(f"Price Bounds: {MIN_ACCEPTABLE_ASK*100:.0f}¢ <= Ask <= 97¢ (98¢ @ >=0.70x) | Window: T-{MAX_REMAINING_SECONDS}s to T-{MIN_REMAINING_SECONDS}s (24/7)", flush=True)
+    print(f"Price Bounds: {MIN_ACCEPTABLE_ASK*100:.0f}¢ <= Ask <= 97¢ (98¢ @ >=0.70x) | Window: T-{MAX_REMAINING_SECONDS}s to T-{MIN_REMAINING_SECONDS}s", flush=True)
+    print(f"Blackout Windows: Asian Midday (06:50-07:30 EAT) | NYSE Bell (17:25-18:05 EAT) | EU Close (19:20-19:40 EAT)", flush=True)
     print("==================================================================", flush=True)
 
     last_heartbeat = 0
     while True:
         try:
             resolve_settled_trades(conn)
+            sync_and_arm_fast_executor(conn)
             evaluate_and_trade(conn)
 
             now = time.time()

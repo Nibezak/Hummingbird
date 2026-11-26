@@ -9,6 +9,8 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const http = require('http');
+const { performance } = require('perf_hooks');
+const WebSocket = require('c:/projects/weather/node_modules/ws');
 
 // Persistent Keep-Alive agent to eliminate repeated 300ms TCP/TLS handshake latency
 const keepAliveAgent = new https.Agent({
@@ -16,6 +18,10 @@ const keepAliveAgent = new https.Agent({
   maxSockets: 25,
   keepAliveMsecs: 60000
 });
+
+// Pre-warmed per-token CLOB metadata cache to eliminate ~430ms createMarketOrder lookup penalty
+const tokenMetaCache = new Map();
+const tokenWarmPromises = new Map();
 
 const weatherDir = 'c:\\projects\\weather';
 const envPath = path.resolve(weatherDir, '.env');
@@ -191,12 +197,75 @@ async function executeMarketBuy(tokenID, amountUSD, maxAcceptablePrice = 0.94) {
   };
 }
 
+async function prewarmTokenMeta(client, assetID) {
+  const key = String(assetID || '');
+  if (!key) return null;
+  const cached = tokenMetaCache.get(key);
+  if (cached && Date.now() - cached.warmedAt < 300000) return cached;
+  if (tokenWarmPromises.has(key)) return tokenWarmPromises.get(key);
+
+  const p = (async () => {
+    try {
+      await client._ensureMarketInfoCached(key);
+      const tickSize = await client.getTickSize(key);
+      const negRisk = await client.getNegRisk(key).catch(() => false);
+      const meta = { tickSize, negRisk, warmedAt: Date.now() };
+      tokenMetaCache.set(key, meta);
+      return meta;
+    } catch (e) {
+      return null;
+    } finally {
+      tokenWarmPromises.delete(key);
+    }
+  })();
+  tokenWarmPromises.set(key, p);
+  return p;
+}
+
+async function prewarmTokens(tokenIDs) {
+  const client = await getClient();
+  const unique = [...new Set((tokenIDs || []).map(String).filter(Boolean))];
+  const t0 = performance.now();
+  await client.resolveVersion().catch(() => null);
+  await Promise.allSettled(unique.map(id => prewarmTokenMeta(client, id)));
+  return { warmed: unique.filter(id => tokenMetaCache.has(id)).length, total: unique.length, elapsedMs: Math.round((performance.now() - t0) * 10) / 10 };
+}
+
+function isOrderMatched(result) {
+  const errStr = result?.error || result?.errorMsg || '';
+  const hasHttpError = Boolean(errStr || (typeof result?.status === 'number' && result.status >= 400));
+  return Boolean(!hasHttpError && result && (
+    result.status === 'matched' ||
+    (result.takingAmount && Number(result.takingAmount) > 0) ||
+    result.success === true
+  ));
+}
+
 async function submitFakOrder(client, assetID, usePositionId, amountUSD, ceilingPrice) {
+  const key = String(assetID);
+  const meta = tokenMetaCache.get(key);
   const orderInput = usePositionId
-    ? { positionID: assetID, side: clobPkg.Side.BUY, amount: amountUSD, price: ceilingPrice, orderType: clobPkg.OrderType.FAK }
-    : { tokenID: assetID, side: clobPkg.Side.BUY, amount: amountUSD, price: ceilingPrice, orderType: clobPkg.OrderType.FAK };
-  const marketOrder = await client.createMarketOrder(orderInput);
-  return client.postOrder(marketOrder, clobPkg.OrderType.FAK);
+    ? { positionID: key, side: clobPkg.Side.BUY, amount: amountUSD, price: ceilingPrice, orderType: clobPkg.OrderType.FAK }
+    : { tokenID: key, side: clobPkg.Side.BUY, amount: amountUSD, price: ceilingPrice, orderType: clobPkg.OrderType.FAK };
+  const orderOpts = meta ? { tickSize: meta.tickSize, negRisk: meta.negRisk } : undefined;
+  const tSign0 = performance.now();
+  const marketOrder = await client.createMarketOrder(orderInput, orderOpts);
+  const signMs = performance.now() - tSign0;
+  const tPost0 = performance.now();
+  const result = await client.postOrder(marketOrder, clobPkg.OrderType.FAK);
+  const postMs = performance.now() - tPost0;
+  return { result, signMs, postMs, cacheHit: Boolean(meta) };
+}
+
+async function submitFakWithFallback(client, assetID, initialUsePositionId, amountUSD, ceilingPrice) {
+  let usePositionId = Boolean(initialUsePositionId);
+  let res = await submitFakOrder(client, assetID, usePositionId, amountUSD, ceilingPrice);
+  let errStr = res.result?.error || res.result?.errorMsg || '';
+  if (typeof errStr === 'string' && errStr.includes('POLY_1271')) {
+    usePositionId = !usePositionId;
+    res = await submitFakOrder(client, assetID, usePositionId, amountUSD, ceilingPrice);
+  }
+  return { ...res, usePositionId };
 }
 
 /**
@@ -270,23 +339,14 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
       const displayAsk = book.bestAsk || candidateAsk;
       console.log(`[CHASER ${attempt}] Submitting FAK Buy [${usePositionId ? 'V3' : 'V2'}] (Direct Ask: ${displayAsk}c | Ceiling: ${ceilingPrice}c | Direct Depth: $${book.askDepth})...`);
 
-      let result = await submitFakOrder(client, tokenID, usePositionId, amountUSD, ceilingPrice);
-      let errStr = result?.error || result?.errorMsg || '';
-      if (typeof errStr === 'string' && errStr.includes('POLY_1271')) {
-        console.log(`[CHASER ${attempt}] Signature routing mismatch -> switching ${usePositionId ? 'V3->V2' : 'V2->V3'} and retrying immediately...`);
-        usePositionId = !usePositionId;
-        result = await submitFakOrder(client, tokenID, usePositionId, amountUSD, ceilingPrice);
-        errStr = result?.error || result?.errorMsg || '';
-      }
+      const fakExec = await submitFakWithFallback(client, tokenID, usePositionId, amountUSD, ceilingPrice);
+      usePositionId = fakExec.usePositionId;
+      const result = fakExec.result;
+      const errStr = result?.error || result?.errorMsg || '';
 
-      console.log(`[CHASER ${attempt}] CLOB response: status=${result?.status}, success=${result?.success}, orderID=${result?.orderID}, taking=${result?.takingAmount}, error=${errStr || 'none'}`);
+      console.log(`[CHASER ${attempt}] CLOB response (${fakExec.signMs.toFixed(1)}ms sign ${fakExec.cacheHit ? 'CACHED' : 'COLD'}, ${fakExec.postMs.toFixed(1)}ms post): status=${result?.status}, success=${result?.success}, orderID=${result?.orderID}, taking=${result?.takingAmount}, error=${errStr || 'none'}`);
 
-      const hasHttpError = Boolean(errStr || (typeof result?.status === 'number' && result.status >= 400));
-      const isMatched = Boolean(!hasHttpError && result && (
-        result.status === 'matched' ||
-        (result.takingAmount && Number(result.takingAmount) > 0) ||
-        result.success === true
-      ));
+      const isMatched = isOrderMatched(result);
 
       let executedPrice = displayAsk;
       if (result && result.takingAmount && result.makingAmount && Number(result.takingAmount) > 0) {
@@ -299,6 +359,9 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
         attempt,
         status: isMatched ? 'FILLED' : 'PARTIAL_OR_UNFILLED',
         bestAsk: executedPrice,
+        signMs: Math.round(fakExec.signMs * 10) / 10,
+        postMs: Math.round(fakExec.postMs * 10) / 10,
+        cacheHit: fakExec.cacheHit,
         latencyMs: Date.now() - tStart,
         result
       });
@@ -309,6 +372,8 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
           success: true,
           attempt,
           executedAsk: executedPrice,
+          signMs: Math.round(fakExec.signMs * 10) / 10,
+          postMs: Math.round(fakExec.postMs * 10) / 10,
           amountUSD,
           tokenID,
           result,
@@ -392,61 +457,478 @@ async function main() {
   }
 }
 
+// =========================================================================
+// SUB-100MS STREAMING EDGE ENGINE (BINANCE WS + POLYMARKET CLOB MARKET WS)
+// =========================================================================
+const BINANCE_TO_ASSET = {
+  BTCUSDT: 'BTC', ETHUSDT: 'ETH', SOLUSDT: 'SOL', DOGEUSDT: 'DOGE',
+  XRPUSDT: 'XRP', BNBUSDT: 'BNB', HYPEUSDT: 'HYPE'
+};
+
+function isInBlackoutWindowUtc() {
+  const now = new Date();
+  const utcMinute = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const isAsianFix = 230 <= utcMinute && utcMinute < 270;   // 03:50 - 04:30 UTC (06:50 - 07:30 AM EAT)
+  const isNyseBell = 865 <= utcMinute && utcMinute < 905;   // 14:25 - 15:05 UTC (05:25 - 06:05 PM EAT)
+  const isEuClose = 980 <= utcMinute && utcMinute < 1000;   // 16:20 - 16:40 UTC (07:20 - 07:40 PM EAT)
+  return isAsianFix || isNyseBell || isEuClose;
+}
+
+class EdgeFastMonitor {
+  constructor() {
+    this.spotPrices = new Map();
+    this.wsBooks = new Map();
+    this.tokenToAsset = new Map();
+    this.armedCycle = null;
+    this.inFlightKeys = new Set();
+    this.filledKeys = new Set();
+    this.cooldowns = new Map();
+    this.pendingFastFills = [];
+    this.nextFillId = 1;
+    this.binanceWs = null;
+    this.polyWs = null;
+    this.polyTokenSignature = '';
+    this.binanceConnected = false;
+    this.polyConnected = false;
+    this.started = false;
+  }
+
+  start() {
+    if (this.started) return;
+    this.started = true;
+    this.connectBinance();
+    this.connectPoly([]);
+  }
+
+  connectBinance() {
+    const streams = Object.keys(BINANCE_TO_ASSET).map(s => `${s.toLowerCase()}@trade`).join('/');
+    const url = `wss://stream.binance.com:9443/stream?streams=${streams}`;
+    try {
+      const ws = new WebSocket(url);
+      this.binanceWs = ws;
+      ws.on('open', () => {
+        this.binanceConnected = true;
+        console.log('[WS BINANCE] Sub-100ms trade stream connected (7 pairs incl. HYPE).');
+      });
+      ws.on('message', (raw) => {
+        const tRecv = performance.now();
+        try {
+          const parsed = JSON.parse(raw.toString());
+          const d = parsed.data || parsed;
+          const asset = BINANCE_TO_ASSET[d.s];
+          const price = parseFloat(d.p);
+          if (asset && price > 0) {
+            this.spotPrices.set(asset, { price, ts: Date.now() });
+            this.evaluateFastAsset(asset, tRecv);
+          }
+        } catch (e) {}
+      });
+      ws.on('close', () => {
+        this.binanceConnected = false;
+        setTimeout(() => this.connectBinance(), 1500);
+      });
+      ws.on('error', () => {});
+    } catch (e) {
+      setTimeout(() => this.connectBinance(), 2000);
+    }
+  }
+
+  connectPoly(tokenIDs) {
+    const cleanIds = [...new Set((tokenIDs || []).map(String).filter(Boolean))];
+    if (this.polyWs) {
+      try { this.polyWs.terminate(); } catch (e) {}
+      this.polyWs = null;
+    }
+    this.polyConnected = false;
+    if (cleanIds.length === 0) return;
+
+    const ws = new WebSocket('wss://ws-subscriptions-clob.polymarket.com/ws/market');
+    this.polyWs = ws;
+    let pingTimer = null;
+
+    ws.on('open', () => {
+      this.polyConnected = true;
+      ws.send(JSON.stringify({ assets_ids: cleanIds, type: 'market' }));
+      console.log(`[WS POLYMARKET] Subscribed live L2 orderbook feed (${cleanIds.length} tokens).`);
+      pingTimer = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) ws.send('PING');
+      }, 10000);
+    });
+
+    ws.on('message', (raw) => {
+      const tRecv = performance.now();
+      const txt = raw.toString();
+      if (!txt || txt === 'PONG') return;
+      try {
+        const msg = JSON.parse(txt);
+        const touchedAssets = new Set();
+        const items = Array.isArray(msg) ? msg : [msg];
+        for (const item of items) {
+          if (item && item.asset_id && Array.isArray(item.asks)) {
+            this.applySnapshot(String(item.asset_id), item.asks);
+            const asset = this.tokenToAsset.get(String(item.asset_id));
+            if (asset) touchedAssets.add(asset);
+          } else if (item && Array.isArray(item.price_changes)) {
+            for (const pc of item.price_changes) {
+              const assetId = String(pc.asset_id || '');
+              if (!assetId) continue;
+              this.applyPriceChange(assetId, pc);
+              const asset = this.tokenToAsset.get(assetId);
+              if (asset) touchedAssets.add(asset);
+            }
+          }
+        }
+        for (const asset of touchedAssets) {
+          this.evaluateFastAsset(asset, tRecv);
+        }
+      } catch (e) {}
+    });
+
+    ws.on('close', () => {
+      if (pingTimer) clearInterval(pingTimer);
+      this.polyConnected = false;
+      if (this.polyWs === ws && this.polyTokenSignature) {
+        const currentIds = this.polyTokenSignature.split(',').filter(Boolean);
+        setTimeout(() => {
+          if (this.polyTokenSignature === currentIds.join(',')) {
+            this.connectPoly(currentIds);
+          }
+        }, 1500);
+      }
+    });
+    ws.on('error', () => {});
+  }
+
+  recomputeTop(book) {
+    const levels = [];
+    for (const [pStr, sNum] of book.asksMap.entries()) {
+      const p = parseFloat(pStr);
+      if (p > 0 && sNum > 0) levels.push([p, sNum]);
+    }
+    levels.sort((a, b) => a[0] - b[0]);
+    book.bestAsk = levels.length > 0 ? levels[0][0] : null;
+    let depth = 0;
+    for (let i = 0; i < Math.min(5, levels.length); i++) {
+      depth += levels[i][0] * levels[i][1];
+    }
+    book.askDepth = Math.round(depth * 100) / 100;
+    book.updatedAt = Date.now();
+  }
+
+  applySnapshot(tokenID, asksArr) {
+    const asksMap = new Map();
+    for (const a of asksArr) {
+      const p = String(a.price);
+      const s = parseFloat(a.size);
+      if (parseFloat(p) > 0 && s > 0) asksMap.set(p, s);
+    }
+    const book = { asksMap, bestAsk: null, askDepth: 0, updatedAt: Date.now() };
+    this.recomputeTop(book);
+    this.wsBooks.set(tokenID, book);
+  }
+
+  applyPriceChange(tokenID, pc) {
+    let book = this.wsBooks.get(tokenID);
+    if (!book) {
+      book = { asksMap: new Map(), bestAsk: null, askDepth: 0, updatedAt: Date.now() };
+      this.wsBooks.set(tokenID, book);
+    }
+    if (String(pc.side || '').toUpperCase() === 'SELL' && pc.price !== undefined) {
+      const pKey = String(pc.price);
+      const sz = parseFloat(pc.size || '0');
+      if (sz > 0) book.asksMap.set(pKey, sz);
+      else book.asksMap.delete(pKey);
+      this.recomputeTop(book);
+    } else if (pc.best_ask !== undefined) {
+      const ba = parseFloat(pc.best_ask);
+      if (ba > 0 && ba < 1 && book.asksMap.size === 0) {
+        book.bestAsk = ba;
+        book.updatedAt = Date.now();
+      }
+    }
+  }
+
+  armCycle(payload) {
+    const assetsMap = new Map();
+    const tokenList = [];
+    this.tokenToAsset.clear();
+
+    for (const a of (payload.assets || [])) {
+      assetsMap.set(a.asset, a);
+      if (a.up_token_id) {
+        const u = String(a.up_token_id);
+        tokenList.push(u);
+        this.tokenToAsset.set(u, a.asset);
+      }
+      if (a.down_token_id) {
+        const d = String(a.down_token_id);
+        tokenList.push(d);
+        this.tokenToAsset.set(d, a.asset);
+      }
+    }
+
+    for (const key of (payload.traded_keys || [])) {
+      this.filledKeys.add(String(key));
+    }
+
+    const cycleChanged = !this.armedCycle || this.armedCycle.cycle_id !== payload.cycle_id;
+    this.armedCycle = {
+      cycle_id: payload.cycle_id,
+      end_ts: Number(payload.end_ts || 0),
+      available_cash: Number(payload.available_cash || 0),
+      blackout_active: Boolean(payload.blackout_active),
+      min_rem: Number(payload.min_rem ?? 45),
+      max_rem: Number(payload.max_rem ?? 120),
+      stake_fraction: Number(payload.stake_fraction ?? 0.20),
+      min_floor: Number(payload.min_floor ?? 1.00),
+      max_ceiling: Number(payload.max_ceiling ?? 15.00),
+      strong_98c_threshold: Number(payload.strong_98c_threshold ?? 0.70),
+      min_ask: Number(payload.min_ask ?? 0.80),
+      max_ask: Number(payload.max_ask ?? 0.98),
+      assetsMap
+    };
+
+    const sig = [...new Set(tokenList)].sort().join(',');
+    if (cycleChanged || sig !== this.polyTokenSignature) {
+      this.polyTokenSignature = sig;
+      this.connectPoly(tokenList);
+      prewarmTokens(tokenList).then(r => {
+        console.log(`[PRE-WARM] Warmed ${r.warmed}/${r.total} tokens for cycle ${payload.cycle_id} in ${r.elapsedMs}ms.`);
+      }).catch(() => {});
+    }
+    return { armed: assetsMap.size, tokens: tokenList.length, available_cash: this.armedCycle.available_cash };
+  }
+
+  selectBoundary(assetInfo, remaining) {
+    const w = assetInfo.windows || {};
+    let k = '30';
+    if (remaining >= 105) k = '120';
+    else if (remaining >= 80) k = '90';
+    else if (remaining >= 55) k = '60';
+    else if (remaining >= 40) k = '45';
+    return w[k] || w['30'] || null;
+  }
+
+  markExternalFilled(cycleId, asset) {
+    if (cycleId && asset) this.filledKeys.add(`${cycleId}:${asset}`);
+  }
+
+  isBlockedExternal(cycleId, asset) {
+    if (!cycleId || !asset) return false;
+    const key = `${cycleId}:${asset}`;
+    return this.filledKeys.has(key) || this.inFlightKeys.has(key);
+  }
+
+  evaluateFastAsset(asset, tDetect) {
+    const cycle = this.armedCycle;
+    if (!cycle || !cachedClient || cycle.blackout_active || isInBlackoutWindowUtc()) return;
+    const assetInfo = cycle.assetsMap.get(asset);
+    if (!assetInfo || !assetInfo.strike) return;
+
+    const nowSec = Date.now() / 1000;
+    const remaining = Math.round(cycle.end_ts - nowSec);
+    if (remaining > cycle.max_rem || remaining < cycle.min_rem) return;
+
+    const key = `${cycle.cycle_id}:${asset}`;
+    if (this.filledKeys.has(key) || this.inFlightKeys.has(key)) return;
+    const cd = this.cooldowns.get(key) || 0;
+    if (Date.now() < cd) return;
+    if (cycle.available_cash < cycle.min_floor) return;
+
+    const spotObj = this.spotPrices.get(asset);
+    if (!spotObj || Date.now() - spotObj.ts > 5000) return;
+    const spot = spotObj.price;
+    const gap = spot - Number(assetInfo.strike);
+
+    const b = this.selectBoundary(assetInfo, remaining);
+    if (!b) return;
+
+    let direction = null;
+    let tokenID = null;
+    let oppTokenID = null;
+    let safeGap = 0;
+    let strong98Req = 0;
+
+    if (gap >= b.up_safe && assetInfo.up_token_id) {
+      direction = 'Up';
+      tokenID = String(assetInfo.up_token_id);
+      oppTokenID = String(assetInfo.down_token_id || '');
+      safeGap = b.up_safe;
+      strong98Req = b.raw_up * cycle.strong_98c_threshold;
+    } else if (gap <= b.dn_safe && assetInfo.down_token_id) {
+      direction = 'Down';
+      tokenID = String(assetInfo.down_token_id);
+      oppTokenID = String(assetInfo.up_token_id || '');
+      safeGap = b.dn_safe;
+      strong98Req = Math.abs(b.raw_dn) * cycle.strong_98c_threshold;
+    } else {
+      return;
+    }
+
+    const book = this.wsBooks.get(tokenID);
+    if (!book || book.bestAsk === null || book.askDepth < 0.50) return;
+    if (book.bestAsk < cycle.min_ask || book.bestAsk > cycle.max_ask) return;
+    if (book.bestAsk > 0.97 && Math.abs(gap) < strong98Req) return;
+
+    let stake = Math.round(Math.min(Math.max(cycle.min_floor, cycle.available_cash * cycle.stake_fraction), cycle.max_ceiling) * 100) / 100;
+    if (cycle.available_cash < stake) {
+      if (cycle.available_cash >= cycle.min_floor) stake = Math.round(cycle.available_cash * 100) / 100;
+      else return;
+    }
+
+    // Synchronous atomic reservation before async CLOB dispatch
+    this.inFlightKeys.add(key);
+    cycle.available_cash = Math.round((cycle.available_cash - stake) * 100) / 100;
+
+    const elapsed = Math.max(0, 300 - remaining);
+    const snapAsk = book.bestAsk;
+    const snapDepth = book.askDepth;
+    const usePosId = Boolean(assetInfo.use_pos_id);
+
+    console.log(`\n[SUB-100MS WS TRIGGER] ${asset} ${direction.toUpperCase()} [${usePosId ? 'V3' : 'V2'}] @ ${(snapAsk * 100).toFixed(1)}c (Depth $${snapDepth}) | T-${remaining}s | Stake $${stake.toFixed(2)}`);
+
+    submitFakWithFallback(cachedClient, tokenID, usePosId, stake, cycle.max_ask).then((execRes) => {
+      const localPipelineMs = Math.round(Math.max(execRes.signMs, performance.now() - tDetect - execRes.postMs) * 10) / 10;
+      const totalMs = Math.round((performance.now() - tDetect) * 10) / 10;
+      const matched = isOrderMatched(execRes.result);
+
+      if (matched) {
+        let executedAsk = snapAsk;
+        if (execRes.result.takingAmount && execRes.result.makingAmount && Number(execRes.result.takingAmount) > 0) {
+          executedAsk = Math.round((Number(execRes.result.makingAmount) / Number(execRes.result.takingAmount)) * 100) / 100;
+        }
+        this.filledKeys.add(key);
+        this.inFlightKeys.delete(key);
+        this.pendingFastFills.push({
+          fill_id: this.nextFillId++,
+          cycle_id: cycle.cycle_id,
+          asset,
+          direction,
+          elapsed_seconds: elapsed,
+          remaining_seconds: remaining,
+          spot_price: spot,
+          strike_price: Number(assetInfo.strike),
+          gap_dollars: gap,
+          safe_gap: safeGap,
+          executed_ask: executedAsk,
+          stake,
+          shares: Math.round((stake / executedAsk) * 100) / 100,
+          local_ms: localPipelineMs,
+          sign_ms: Math.round(execRes.signMs * 10) / 10,
+          post_ms: Math.round(execRes.postMs * 10) / 10,
+          total_ms: totalMs,
+          timestamp: Math.floor(Date.now() / 1000),
+          call_time: new Date().toISOString()
+        });
+        console.log(`[SUB-100MS FILLED!] ${asset} ${direction.toUpperCase()} @ ${(executedAsk * 100).toFixed(1)}c | Local Detect->Sign->Wire: ${localPipelineMs}ms (Sign: ${execRes.signMs.toFixed(1)}ms) | CLOB ACK: ${execRes.postMs.toFixed(1)}ms`);
+      } else {
+        cycle.available_cash = Math.round((cycle.available_cash + stake) * 100) / 100;
+        this.cooldowns.set(key, Date.now() + 400);
+        this.inFlightKeys.delete(key);
+        const errMsg = execRes.result?.error || execRes.result?.errorMsg || execRes.result?.status || 'UNFILLED';
+        console.log(`[WS FAST MISS] ${asset} ${direction.toUpperCase()} unfilled (${errMsg}) | Local: ${localPipelineMs}ms | Released $${stake.toFixed(2)}`);
+      }
+    }).catch((err) => {
+      cycle.available_cash = Math.round((cycle.available_cash + stake) * 100) / 100;
+      this.cooldowns.set(key, Date.now() + 500);
+      this.inFlightKeys.delete(key);
+      console.error(`[WS FAST ERROR] ${asset}: ${err.message}`);
+    });
+  }
+}
+
+const fastMonitor = new EdgeFastMonitor();
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try { resolve(JSON.parse(body || '{}')); }
+      catch (e) { reject(e); }
+    });
+    req.on('error', reject);
+  });
+}
+
+function sendJson(res, status, data) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(data));
+}
+
 function startExecutionServer(port = 8897) {
   console.log(`[PRE-WARMED EXECUTOR] Initializing and pre-authenticating ClobClient...`);
   getClient().then(() => {
     console.log(`[PRE-WARMED EXECUTOR] ClobClient ready and authenticated with keep-alive.`);
+    fastMonitor.start();
   }).catch(err => {
     console.error(`[PRE-WARMED EXECUTOR] Warning during client pre-warm: ${err.message}`);
   });
 
   const server = http.createServer(async (req, res) => {
-    if (req.method === 'POST' && req.url === '/chaser') {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', async () => {
+    try {
+      if (req.method === 'POST' && req.url === '/chaser') {
         const tStart = Date.now();
-        try {
-          const payload = JSON.parse(body || '{}');
-          const tokenID = payload.tokenID;
-          const amountUSD = parseFloat(payload.amountUSD || '1.00');
-          const options = payload.options || {};
-          
-          console.log(`\n[SERVER DISPATCH] Immediate trade request for Token ${tokenID} ($${amountUSD})...`);
-          const result = await executeMarketBuyWithChaser(tokenID, amountUSD, options);
-          const duration = Date.now() - tStart;
-          console.log(`[SERVER DISPATCH COMPLETED] Execution duration: ${duration}ms | Success: ${result.success}`);
-          
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(result));
-        } catch (err) {
-          console.error(`[SERVER DISPATCH ERROR] ${err.message}`);
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: err.message }));
+        const payload = await readJsonBody(req);
+        const tokenID = payload.tokenID;
+        const amountUSD = parseFloat(payload.amountUSD || '1.00');
+        const options = payload.options || {};
+        if (options.cycleId && options.asset && fastMonitor.isBlockedExternal(options.cycleId, options.asset)) {
+          return sendJson(res, 200, { success: false, reason: 'ALREADY_FILLED_OR_IN_FLIGHT_WS' });
         }
-      });
-    } else if (req.method === 'POST' && req.url === '/books') {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', async () => {
-        try {
-          const payload = JSON.parse(body || '{}');
-          const tokenIDs = Array.isArray(payload.tokenIDs) ? payload.tokenIDs : [];
-          const results = await Promise.all(tokenIDs.map(id => fetchOrderBook(id).then(b => [String(id), { bestAsk: b.bestAsk, askDepth: b.askDepth }])));
-          const books = Object.fromEntries(results);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ books }));
-        } catch (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+        console.log(`\n[SERVER DISPATCH] Immediate trade request for Token ${tokenID} ($${amountUSD})...`);
+        const result = await executeMarketBuyWithChaser(tokenID, amountUSD, options);
+        if (result.success && options.cycleId && options.asset) {
+          fastMonitor.markExternalFilled(options.cycleId, options.asset);
         }
-      });
-    } else if (req.method === 'GET' && req.url === '/ping') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ready', time: Date.now() }));
-    } else {
-      res.writeHead(404);
-      res.end('Not Found');
+        const duration = Date.now() - tStart;
+        console.log(`[SERVER DISPATCH COMPLETED] Execution duration: ${duration}ms | Success: ${result.success}`);
+        return sendJson(res, 200, result);
+      } else if (req.method === 'POST' && req.url === '/books') {
+        const payload = await readJsonBody(req);
+        const tokenIDs = Array.isArray(payload.tokenIDs) ? payload.tokenIDs : [];
+        const results = await Promise.all(tokenIDs.map(async id => {
+          const sId = String(id);
+          const wsBook = fastMonitor.wsBooks.get(sId);
+          if (wsBook && wsBook.bestAsk !== null && Date.now() - wsBook.updatedAt < 4000) {
+            return [sId, { bestAsk: wsBook.bestAsk, askDepth: wsBook.askDepth, source: 'ws' }];
+          }
+          const b = await fetchOrderBook(sId);
+          return [sId, { bestAsk: b.bestAsk, askDepth: b.askDepth, source: 'rest' }];
+        }));
+        return sendJson(res, 200, { books: Object.fromEntries(results) });
+      } else if (req.method === 'POST' && req.url === '/prewarm') {
+        const payload = await readJsonBody(req);
+        const out = await prewarmTokens(payload.tokenIDs || []);
+        return sendJson(res, 200, out);
+      } else if (req.method === 'POST' && req.url === '/cycle_arm') {
+        const payload = await readJsonBody(req);
+        const out = fastMonitor.armCycle(payload);
+        return sendJson(res, 200, out);
+      } else if (req.method === 'GET' && req.url === '/fast_fills') {
+        return sendJson(res, 200, { fills: fastMonitor.pendingFastFills });
+      } else if (req.method === 'POST' && req.url === '/fast_fills_ack') {
+        const payload = await readJsonBody(req);
+        const ackIds = new Set((payload.fill_ids || []).map(Number));
+        fastMonitor.pendingFastFills = fastMonitor.pendingFastFills.filter(f => !ackIds.has(f.fill_id));
+        return sendJson(res, 200, { remaining: fastMonitor.pendingFastFills.length });
+      } else if (req.method === 'GET' && req.url === '/ping') {
+        return sendJson(res, 200, {
+          status: 'ready',
+          time: Date.now(),
+          binanceWs: fastMonitor.binanceConnected,
+          polyWs: fastMonitor.polyConnected,
+          prewarmedTokens: tokenMetaCache.size,
+          wsBooksCount: fastMonitor.wsBooks.size,
+          armedCycle: fastMonitor.armedCycle ? fastMonitor.armedCycle.cycle_id : null
+        });
+      } else {
+        res.writeHead(404);
+        res.end('Not Found');
+      }
+    } catch (err) {
+      console.error(`[SERVER ERROR] ${err.message}`);
+      sendJson(res, 500, { success: false, error: err.message });
     }
   });
 

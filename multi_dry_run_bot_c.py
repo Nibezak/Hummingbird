@@ -72,7 +72,12 @@ def get_boundaries_for_asset(asset, remaining):
     return round(up_v * mult, 6), round(dn_v * mult, 6)
 
 def is_in_blackout_window():
-    return False
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    utc_minute = now_utc.hour * 60 + now_utc.minute
+    is_asian_fix = 230 <= utc_minute < 270   # 03:50 - 04:30 UTC (06:50 - 07:30 AM EAT)
+    is_nyse_bell = 865 <= utc_minute < 905   # 14:25 - 15:05 UTC (05:25 - 06:05 PM EAT)
+    is_eu_close = 980 <= utc_minute < 1000   # 16:20 - 16:40 UTC (07:20 - 07:40 PM EAT)
+    return is_asian_fix or is_nyse_bell or is_eu_close
 
 def get_wallet_balance(conn):
     cur = conn.cursor()
