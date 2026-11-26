@@ -5,21 +5,25 @@ import json
 import os
 import urllib.request
 import urllib.error
+import concurrent.futures
 
 DB_PATH = r"c:\projects\btc-5m-recorder\multi_crypto_data.db"
 BOUNDARIES_CONFIG_PATH = r"c:\projects\btc-5m-recorder\multi_asset_safe_boundaries.json"
 
 CURRENT_SESSION = 3
 WALLET_ID = 3  # Wallet 3 for Bot C (Ultra High Frequency - T <= 120s)
-MAX_STAKE_CEILING = 10.00
-STAKE_FRACTION = 0.15
+MAX_STAKE_CEILING = 15.00
+STAKE_FRACTION = 0.20
 MIN_ACCEPTABLE_ASK = 0.80
 MAX_ACCEPTABLE_ASK = 0.98
+STRONG_98C_THRESHOLD = 0.70
 MIN_REMAINING_SECONDS = 45
 MAX_REMAINING_SECONDS = 120
-MAJOR_ASSETS = {'BTC', 'ETH', 'SOL', 'XRP'}
-MAJOR_GAP_MULTIPLIER = 0.55
-ALT_GAP_MULTIPLIER = 0.75
+ASSET_GAP_MULTIPLIERS = {
+    'BTC': 0.45, 'ETH': 0.50, 'SOL': 0.55, 'XRP': 0.55,
+    'DOGE': 0.55, 'BNB': 0.65, 'HYPE': 0.75
+}
+_BOUNDARIES_CACHE = {'mtime': 0, 'data': None}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 # Default Empirical HF Boundaries fallbacks with 120s Brownian diffusion (+5% buffer)
@@ -33,39 +37,42 @@ DEFAULT_HF_BOUNDARIES = {
     'HYPE': {120: (1.6, -1.3), 90: (1.37, -1.14), 60: (1.00, -0.82), 45: (0.73, -0.59), 30: (0.50, -0.41), 15: (0.32, -0.23)}
 }
 
-def get_boundaries_for_asset(asset, remaining):
-    mult = MAJOR_GAP_MULTIPLIER if asset in MAJOR_ASSETS else ALT_GAP_MULTIPLIER
+def get_raw_hf_boundaries(asset, remaining):
     if os.path.exists(BOUNDARIES_CONFIG_PATH):
         try:
-            with open(BOUNDARIES_CONFIG_PATH, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if asset in data and 'windows' in data[asset]:
-                    w_dict = data[asset]['windows']
-                    if remaining >= 105: key = '120'
-                    elif remaining >= 80: key = '90'
-                    elif remaining >= 55: key = '60'
-                    elif remaining >= 40: key = '45'
-                    else: key = '30'
-                    if key in w_dict:
-                        return round(w_dict[key]['hf_up'] * mult, 6), round(w_dict[key]['hf_dn'] * mult, 6)
+            mtime = os.path.getmtime(BOUNDARIES_CONFIG_PATH)
+            if mtime != _BOUNDARIES_CACHE['mtime'] or _BOUNDARIES_CACHE['data'] is None:
+                with open(BOUNDARIES_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                    _BOUNDARIES_CACHE['data'] = json.load(f)
+                    _BOUNDARIES_CACHE['mtime'] = mtime
+            data = _BOUNDARIES_CACHE['data']
+            if asset in data and 'windows' in data[asset]:
+                w_dict = data[asset]['windows']
+                if remaining >= 105: key = '120'
+                elif remaining >= 80: key = '90'
+                elif remaining >= 55: key = '60'
+                elif remaining >= 40: key = '45'
+                else: key = '30'
+                if key in w_dict:
+                    return w_dict[key]['hf_up'], w_dict[key]['hf_dn']
         except Exception:
             pass
-            
+
     fb = DEFAULT_HF_BOUNDARIES.get(asset, DEFAULT_HF_BOUNDARIES['BTC'])
-    if remaining >= 105: up_v, dn_v = fb[120]
-    elif remaining >= 80: up_v, dn_v = fb[90]
-    elif remaining >= 55: up_v, dn_v = fb[60]
-    elif remaining >= 40: up_v, dn_v = fb[45]
-    elif remaining >= 25: up_v, dn_v = fb[30]
-    else: up_v, dn_v = fb[15]
+    if remaining >= 105: return fb[120]
+    elif remaining >= 80: return fb[90]
+    elif remaining >= 55: return fb[60]
+    elif remaining >= 40: return fb[45]
+    elif remaining >= 25: return fb[30]
+    else: return fb[15]
+
+def get_boundaries_for_asset(asset, remaining):
+    mult = ASSET_GAP_MULTIPLIERS.get(asset, 0.75)
+    up_v, dn_v = get_raw_hf_boundaries(asset, remaining)
     return round(up_v * mult, 6), round(dn_v * mult, 6)
 
 def is_in_blackout_window():
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    utc_minute = now_utc.hour * 60 + now_utc.minute
-    is_nyse_bell = 865 <= utc_minute < 905
-    is_eu_close = 980 <= utc_minute < 1000
-    return is_nyse_bell or is_eu_close
+    return False
 
 def get_wallet_balance(conn):
     cur = conn.cursor()
@@ -232,34 +239,37 @@ def evaluate_and_trade(conn):
             continue
 
         up_safe, dn_safe = get_boundaries_for_asset(asset, remaining)
+        raw_up, raw_dn = get_raw_hf_boundaries(asset, remaining)
 
         # Check UP
         if gap >= up_safe:
             fill = fetch_live_orderbook_fill(up_tok, dn_tok, nominal_stake, cur, cid, asset, 'Up')
             if fill and (MIN_ACCEPTABLE_ASK <= fill['best_ask'] <= MAX_ACCEPTABLE_ASK):
                 ask = fill['best_ask']
-                candidates.append({
-                    'asset': asset, 'cycle_id': cid, 'direction': 'Up', 'elapsed': elapsed,
-                    'remaining': remaining, 'spot': spot, 'strike': strike, 'gap': gap,
-                    'ask': ask, 'best_ask': fill['best_ask'], 'depth': fill['depth'],
-                    'shares': fill['shares'],
-                    'source': fill['source'],
-                    'rule': f'Bot C Ultra HF UP Gap >= +${up_safe} at T-{remaining}s'
-                })
+                if ask <= 0.97 or abs(gap) >= round(raw_up * STRONG_98C_THRESHOLD, 6):
+                    candidates.append({
+                        'asset': asset, 'cycle_id': cid, 'direction': 'Up', 'elapsed': elapsed,
+                        'remaining': remaining, 'spot': spot, 'strike': strike, 'gap': gap,
+                        'ask': ask, 'best_ask': fill['best_ask'], 'depth': fill['depth'],
+                        'shares': fill['shares'],
+                        'source': fill['source'],
+                        'rule': f'Bot C Ultra HF UP Gap >= +${up_safe} at T-{remaining}s'
+                    })
 
         # Check DOWN
         elif gap <= dn_safe:
             fill = fetch_live_orderbook_fill(dn_tok, up_tok, nominal_stake, cur, cid, asset, 'Down')
             if fill and (MIN_ACCEPTABLE_ASK <= fill['best_ask'] <= MAX_ACCEPTABLE_ASK):
                 ask = fill['best_ask']
-                candidates.append({
-                    'asset': asset, 'cycle_id': cid, 'direction': 'Down', 'elapsed': elapsed,
-                    'remaining': remaining, 'spot': spot, 'strike': strike, 'gap': gap,
-                    'ask': ask, 'best_ask': fill['best_ask'], 'depth': fill['depth'],
-                    'shares': fill['shares'],
-                    'source': fill['source'],
-                    'rule': f'Bot C Ultra HF DOWN Gap <= ${dn_safe} at T-{remaining}s'
-                })
+                if ask <= 0.97 or abs(gap) >= round(abs(raw_dn) * STRONG_98C_THRESHOLD, 6):
+                    candidates.append({
+                        'asset': asset, 'cycle_id': cid, 'direction': 'Down', 'elapsed': elapsed,
+                        'remaining': remaining, 'spot': spot, 'strike': strike, 'gap': gap,
+                        'ask': ask, 'best_ask': fill['best_ask'], 'depth': fill['depth'],
+                        'shares': fill['shares'],
+                        'source': fill['source'],
+                        'rule': f'Bot C Ultra HF DOWN Gap <= ${dn_safe} at T-{remaining}s'
+                    })
 
     if not candidates:
         return
@@ -322,7 +332,7 @@ def main():
                 print(f"[{dt_str}] BOT C HEARTBEAT | Equity: ${current_bal:.2f} (In-Play: ${in_play:.2f}) | Trades: {tot} | Wins: {wins} ({win_pct:.1f}%)", flush=True)
                 last_heartbeat = now
 
-            time.sleep(0.5)
+            time.sleep(0.25)
         except Exception as e:
             print(f"[BOT C ERROR] Loop exception: {e}", flush=True)
             time.sleep(2.0)

@@ -214,7 +214,9 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
     minSafeGap = null,
     direction = 'UP',
     oppTokenID = null,
-    expectedPrice = null
+    expectedPrice = null,
+    expectedDepth = 10.0,
+    skipFirstBookCheck = false
   } = options;
 
   let usePositionId = Boolean(options.usePositionId);
@@ -231,10 +233,15 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
   while (attempt < maxRetries) {
     attempt++;
     const tStart = Date.now();
-    console.log(`\n[CHASER ATTEMPT ${attempt}/${maxRetries}] Checking live book for ${usePositionId ? 'Position(V3)' : 'Token(V2)'} ${tokenID}...`);
-
-    // 1. Direct orderbook check
-    const book = await fetchOrderBook(tokenID, oppTokenID);
+    const usePrechecked = attempt === 1 && skipFirstBookCheck && expectedPrice && expectedPrice <= maxAcceptablePrice;
+    let book;
+    if (usePrechecked) {
+      book = { bestAsk: expectedPrice, askDepth: expectedDepth };
+      console.log(`\n[CHASER ATTEMPT 1/${maxRetries}] Fast-path fire [${usePositionId ? 'V3' : 'V2'}] (Pre-checked ${expectedPrice}c | Depth: $${expectedDepth})...`);
+    } else {
+      console.log(`\n[CHASER ATTEMPT ${attempt}/${maxRetries}] Checking live book for ${usePositionId ? 'Position(V3)' : 'Token(V2)'} ${tokenID}...`);
+      book = await fetchOrderBook(tokenID, oppTokenID);
+    }
     const candidateAsk = book.bestAsk || expectedPrice || maxAcceptablePrice;
 
     // 2. Strict ceiling check (never buy at or above 99c)
@@ -416,6 +423,22 @@ function startExecutionServer(port = 8897) {
           console.error(`[SERVER DISPATCH ERROR] ${err.message}`);
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+      });
+    } else if (req.method === 'POST' && req.url === '/books') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', async () => {
+        try {
+          const payload = JSON.parse(body || '{}');
+          const tokenIDs = Array.isArray(payload.tokenIDs) ? payload.tokenIDs : [];
+          const results = await Promise.all(tokenIDs.map(id => fetchOrderBook(id).then(b => [String(id), { bestAsk: b.bestAsk, askDepth: b.askDepth }])));
+          const books = Object.fromEntries(results);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ books }));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
         }
       });
     } else if (req.method === 'GET' && req.url === '/ping') {

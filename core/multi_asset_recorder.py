@@ -230,7 +230,7 @@ def record_multi_loop():
                 gap_pct = round((gap / strike) * 100, 3) if strike > 0 else 0.0
                 pending_assets.append((asset, spot, gap, gap_pct))
                 
-                if 15 <= remaining <= 120:
+                if 15 <= remaining <= 150:
                     if gap > 0 and up_tok:
                         book_futures[asset] = ('up', book_executor.submit(fetch_orderbook, up_tok))
                     elif gap < 0 and dn_tok:
