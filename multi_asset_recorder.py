@@ -179,7 +179,7 @@ def check_and_finalize_pending_cycles(conn):
                 pass
 
 def record_multi_loop():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     print("==================================================================", flush=True)
     print("🌐 MULTI-ASSET 7-CRYPTO POLYMARKET RECORDER ACTIVATED", flush=True)
     print(f"📁 Database: {DB_PATH}", flush=True)
@@ -188,6 +188,7 @@ def record_multi_loop():
     
     last_sec = -1
     cycle_token_cache = {}
+    book_executor = concurrent.futures.ThreadPoolExecutor(max_workers=7)
     
     while True:
         try:
@@ -209,8 +210,9 @@ def record_multi_loop():
                 time.sleep(0.5)
                 continue
                 
-            # 2. Process each of the 7 assets
-            snap_batch = []
+            # 2. Prepare asset metadata and launch parallel orderbook fetches in T-120s..T-15s every 1s
+            pending_assets = []
+            book_futures = {}
             
             for asset, sym_code in ASSETS.items():
                 spot = price_map.get(sym_code)
@@ -226,22 +228,32 @@ def record_multi_loop():
                     
                 gap = round(spot - strike, 4 if spot < 10 else 2)
                 gap_pct = round((gap / strike) * 100, 3) if strike > 0 else 0.0
+                pending_assets.append((asset, spot, gap, gap_pct))
                 
-                up_ask, up_dep, dn_ask, dn_dep = None, 0.0, None, 0.0
-                
-                # Fetch books during critical trading window (T-120s to T-15s)
-                if 15 <= remaining <= 120 and (elapsed % 3 == 0):
+                if 15 <= remaining <= 120:
                     if gap > 0 and up_tok:
-                        bk = fetch_orderbook(up_tok)
-                        up_ask = bk["best_ask"]
-                        up_dep = bk["ask_depth"]
+                        book_futures[asset] = ('up', book_executor.submit(fetch_orderbook, up_tok))
                     elif gap < 0 and dn_tok:
-                        bk = fetch_orderbook(dn_tok)
-                        dn_ask = bk["best_ask"]
-                        dn_dep = bk["ask_depth"]
+                        book_futures[asset] = ('dn', book_executor.submit(fetch_orderbook, dn_tok))
                         
+            snap_ts = int(time.time()) if book_futures else now_int
+            snap_batch = []
+            for asset, spot, gap, gap_pct in pending_assets:
+                up_ask, up_dep, dn_ask, dn_dep = None, 0.0, None, 0.0
+                if asset in book_futures:
+                    side, fut = book_futures[asset]
+                    try:
+                        bk = fut.result(timeout=2.2)
+                        if side == 'up':
+                            up_ask = bk["best_ask"]
+                            up_dep = bk["ask_depth"]
+                        else:
+                            dn_ask = bk["best_ask"]
+                            dn_dep = bk["ask_depth"]
+                    except Exception:
+                        pass
                 snap_batch.append((
-                    cycle_ts, asset, now_int, elapsed, remaining, spot, gap, gap_pct,
+                    cycle_ts, asset, snap_ts, elapsed, remaining, spot, gap, gap_pct,
                     up_ask, up_dep, dn_ask, dn_dep
                 ))
                 

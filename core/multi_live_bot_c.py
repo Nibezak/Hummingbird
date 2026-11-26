@@ -17,7 +17,12 @@ STAKE_FRACTION = 0.15       # 15% of available cash
 MIN_STAKE_FLOOR = 1.00      # Polymarket CLOB minimum taker order size ($1.00 USDC)
 MAX_STAKE_CEILING = 10.00   # Upper safety ceiling per trade
 MAX_ACCEPTABLE_ASK = 0.98
-MIN_ACCEPTABLE_ASK = 0.65
+MIN_ACCEPTABLE_ASK = 0.80
+MIN_REMAINING_SECONDS = 45
+MAX_REMAINING_SECONDS = 120
+MAJOR_ASSETS = {'BTC', 'ETH', 'SOL', 'XRP'}
+MAJOR_GAP_MULTIPLIER = 0.55
+ALT_GAP_MULTIPLIER = 0.75
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 # Default Empirical HF Boundaries fallbacks with 120s Brownian diffusion (+5% buffer)
@@ -32,6 +37,7 @@ DEFAULT_HF_BOUNDARIES = {
 }
 
 def get_boundaries_for_asset(asset, remaining):
+    mult = MAJOR_GAP_MULTIPLIER if asset in MAJOR_ASSETS else ALT_GAP_MULTIPLIER
     if os.path.exists(BOUNDARIES_CONFIG_PATH):
         try:
             with open(BOUNDARIES_CONFIG_PATH, 'r', encoding='utf-8') as f:
@@ -44,17 +50,18 @@ def get_boundaries_for_asset(asset, remaining):
                     elif remaining >= 40: key = '45'
                     else: key = '30'
                     if key in w_dict:
-                        return w_dict[key]['hf_up'], w_dict[key]['hf_dn']
+                        return round(w_dict[key]['hf_up'] * mult, 6), round(w_dict[key]['hf_dn'] * mult, 6)
         except Exception:
             pass
             
     fb = DEFAULT_HF_BOUNDARIES.get(asset, DEFAULT_HF_BOUNDARIES['BTC'])
-    if remaining >= 105: return fb[120]
-    elif remaining >= 80: return fb[90]
-    elif remaining >= 55: return fb[60]
-    elif remaining >= 40: return fb[45]
-    elif remaining >= 25: return fb[30]
-    else: return fb[15]
+    if remaining >= 105: up_v, dn_v = fb[120]
+    elif remaining >= 80: up_v, dn_v = fb[90]
+    elif remaining >= 55: up_v, dn_v = fb[60]
+    elif remaining >= 40: up_v, dn_v = fb[45]
+    elif remaining >= 25: up_v, dn_v = fb[30]
+    else: up_v, dn_v = fb[15]
+    return round(up_v * mult, 6), round(dn_v * mult, 6)
 
 def is_in_blackout_window():
     now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -269,8 +276,8 @@ def evaluate_and_trade(conn):
         if not strike:
             continue
 
-        # Bot C Ultra HF evaluates between T-120s and T-15s
-        if remaining > 120 or remaining < 15:
+        # Bot C Ultra HF evaluates in positive-EV early/mid window (T-120s to T-45s)
+        if remaining > MAX_REMAINING_SECONDS or remaining < MIN_REMAINING_SECONDS:
             continue
 
         cur.execute("SELECT trade_id FROM multi_trades WHERE cycle_id = ? AND asset = ? AND session_id = ?", (cid, asset, CURRENT_SESSION))
@@ -355,12 +362,12 @@ def evaluate_and_trade(conn):
             print(f"[LIVE EXECUTION ERROR] {str(e)}", flush=True)
 
 def main():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     print("==================================================================", flush=True)
     print(f"MULTI-ASSET LIVE BOT C (REAL USDC TRADING) ACTIVATED (RUN #{CURRENT_SESSION})", flush=True)
     print(f"Initial Bankroll: ${get_wallet_balance(conn):.2f} USDC | Stake Sizing: 15% (Min Floor: ${MIN_STAKE_FLOOR:.2f}, Max Cap: ${MAX_STAKE_CEILING:.2f})", flush=True)
     print(f"Execution Engine: Polymarket CLOB Taker with Adaptive Chaser & Verification", flush=True)
-    print(f"Price Bounds: {MIN_ACCEPTABLE_ASK*100:.0f}¢ <= Ask <= {MAX_ACCEPTABLE_ASK*100:.0f}¢ | Window: T-120s to T-15s", flush=True)
+    print(f"Price Bounds: {MIN_ACCEPTABLE_ASK*100:.0f}¢ <= Ask <= {MAX_ACCEPTABLE_ASK*100:.0f}¢ | Window: T-{MAX_REMAINING_SECONDS}s to T-{MIN_REMAINING_SECONDS}s", flush=True)
     print("==================================================================", flush=True)
 
     last_heartbeat = 0
@@ -387,7 +394,7 @@ def main():
 
         except Exception as e:
             print(f"[LIVE LOOP ERROR] {str(e)}", flush=True)
-        time.sleep(1.0)
+        time.sleep(0.5)
 
 if __name__ == "__main__":
     main()
