@@ -6,6 +6,7 @@ import os
 import subprocess
 import urllib.request
 import urllib.error
+import concurrent.futures
 
 DB_PATH = r"c:\projects\btc-5m-recorder\multi_crypto_data.db"
 BOUNDARIES_CONFIG_PATH = r"c:\projects\btc-5m-recorder\multi_asset_safe_boundaries.json"
@@ -196,7 +197,7 @@ def resolve_settled_trades(conn):
         verdict = "WON!" if is_winner else "LOST (-100%)"
         print(f"\n[LIVE SETTLED {asset}] Trade #{t_id} (Cycle {cid}) | Prediction: {direction.upper()} | Winner: {winner.upper()} -> {verdict} | PnL: ${pnl:+.2f} | Bankroll: ${new_wallet:.2f}", flush=True)
 
-def execute_live_chaser(token_id, stake, max_price, retries, asset, strike, safe_gap, direction, opp_token_id, ask):
+def execute_live_chaser(token_id, stake, max_price, retries, asset, strike, safe_gap, direction, opp_token_id, ask, use_position_id=False):
     """
     Ultra-low latency live order execution:
     1. Dispatches directly via persistent pre-warmed executor server on port 8897 (<2ms dispatch, keep-alive TLS).
@@ -216,7 +217,8 @@ def execute_live_chaser(token_id, stake, max_price, retries, asset, strike, safe
                 "minSafeGap": safe_gap,
                 "direction": direction,
                 "oppTokenID": str(opp_token_id or ''),
-                "expectedPrice": ask
+                "expectedPrice": ask,
+                "usePositionId": bool(use_position_id)
             }
         }).encode('utf-8')
         req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
@@ -239,6 +241,16 @@ def execute_live_chaser(token_id, stake, max_price, retries, asset, strike, safe
         exec_res = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
         return parse_executor_output(exec_res.stdout)
 
+def _is_v3_position_market(cond_id, up_tok, dn_tok):
+    if cond_id and cond_id.startswith("0x01") and cond_id.endswith("000000000000000000000000"):
+        return True
+    try:
+        if up_tok and dn_tok and abs(int(up_tok) - int(dn_tok)) == 1:
+            return True
+    except Exception:
+        pass
+    return False
+
 def evaluate_and_trade(conn):
     wallet_balance = get_wallet_balance(conn)
     if wallet_balance < MIN_STAKE_FLOOR:
@@ -258,7 +270,7 @@ def evaluate_and_trade(conn):
     cur.execute("""
         SELECT s.cycle_id, s.asset, s.elapsed_seconds, s.remaining_seconds, s.spot_price, s.gap_dollars,
                s.up_best_ask, s.up_ask_depth, s.down_best_ask, s.down_ask_depth, c.strike_price,
-               c.up_token_id, c.down_token_id
+               c.up_token_id, c.down_token_id, c.condition_id
         FROM multi_snapshots s
         JOIN multi_cycles c ON s.cycle_id = c.cycle_id AND s.asset = c.asset
         WHERE c.status = 'ACTIVE'
@@ -271,8 +283,9 @@ def evaluate_and_trade(conn):
     candidates = []
     nominal_stake = round(min(max(MIN_STAKE_FLOOR, available_cash * STAKE_FRACTION), MAX_STAKE_CEILING), 2)
 
+    qualified_probes = []
     for r in rows:
-        cid, asset, elapsed, remaining, spot, gap, up_ask, up_dep, dn_ask, dn_dep, strike, up_tok, dn_tok = r
+        cid, asset, elapsed, remaining, spot, gap, up_ask, up_dep, dn_ask, dn_dep, strike, up_tok, dn_tok, cond_id = r
         if not strike:
             continue
 
@@ -285,81 +298,113 @@ def evaluate_and_trade(conn):
             continue
 
         up_safe, dn_safe = get_boundaries_for_asset(asset, remaining)
+        use_pos_id = _is_v3_position_market(cond_id, up_tok, dn_tok)
 
-        # Check UP
         if gap >= up_safe and up_tok:
-            fill = fetch_live_orderbook_fill(up_tok, dn_tok, nominal_stake, cur, cid, asset, 'Up')
-            if fill and (MIN_ACCEPTABLE_ASK <= fill['best_ask'] <= MAX_ACCEPTABLE_ASK):
-                candidates.append({
-                    'asset': asset, 'cycle_id': cid, 'direction': 'Up', 'token_id': up_tok,
-                    'opp_token_id': dn_tok,
-                    'elapsed': elapsed, 'remaining': remaining, 'spot': spot, 'strike': strike,
-                    'gap': gap, 'safe_gap': up_safe, 'ask': fill['best_ask'], 'depth': fill['depth'],
-                    'rule': f'Bot C Ultra HF UP Gap >= +${up_safe} at T-{remaining}s'
-                })
-
-        # Check DOWN
+            qualified_probes.append({
+                'asset': asset, 'cycle_id': cid, 'direction': 'Up', 'token_id': up_tok,
+                'opp_token_id': dn_tok, 'elapsed': elapsed, 'remaining': remaining,
+                'spot': spot, 'strike': strike, 'gap': gap, 'safe_gap': up_safe,
+                'use_pos_id': use_pos_id,
+                'rule': f'Bot C Ultra HF UP Gap >= +${up_safe} at T-{remaining}s'
+            })
         elif gap <= dn_safe and dn_tok:
-            fill = fetch_live_orderbook_fill(dn_tok, up_tok, nominal_stake, cur, cid, asset, 'Down')
+            qualified_probes.append({
+                'asset': asset, 'cycle_id': cid, 'direction': 'Down', 'token_id': dn_tok,
+                'opp_token_id': up_tok, 'elapsed': elapsed, 'remaining': remaining,
+                'spot': spot, 'strike': strike, 'gap': gap, 'safe_gap': dn_safe,
+                'use_pos_id': use_pos_id,
+                'rule': f'Bot C Ultra HF DOWN Gap <= ${dn_safe} at T-{remaining}s'
+            })
+
+    if not qualified_probes:
+        return
+
+    # Fetch direct CLOB asks for all qualifying assets in parallel (sub-300ms total)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(qualified_probes)) as book_pool:
+        fut_map = {
+            book_pool.submit(fetch_live_orderbook_fill, p['token_id'], p['opp_token_id'], nominal_stake, None, p['cycle_id'], p['asset'], p['direction']): p
+            for p in qualified_probes
+        }
+        for fut, p in fut_map.items():
+            try:
+                fill = fut.result(timeout=4.0)
+            except Exception:
+                fill = None
+            if not fill:
+                fill = fetch_live_orderbook_fill(p['token_id'], p['opp_token_id'], nominal_stake, cur, p['cycle_id'], p['asset'], p['direction'])
             if fill and (MIN_ACCEPTABLE_ASK <= fill['best_ask'] <= MAX_ACCEPTABLE_ASK):
-                candidates.append({
-                    'asset': asset, 'cycle_id': cid, 'direction': 'Down', 'token_id': dn_tok,
-                    'opp_token_id': up_tok,
-                    'elapsed': elapsed, 'remaining': remaining, 'spot': spot, 'strike': strike,
-                    'gap': gap, 'safe_gap': dn_safe, 'ask': fill['best_ask'], 'depth': fill['depth'],
-                    'rule': f'Bot C Ultra HF DOWN Gap <= ${dn_safe} at T-{remaining}s'
-                })
+                p['ask'] = fill['best_ask']
+                p['depth'] = fill['depth']
+                candidates.append(p)
 
     if not candidates:
         return
 
-    # Prioritize contract with lowest ask price first
+    # Prioritize contract with lowest ask price first and reserve stakes before parallel dispatch
     candidates.sort(key=lambda x: x['ask'])
-
+    dispatches = []
+    temp_cash = available_cash
     for cand in candidates:
-        stake = round(min(max(MIN_STAKE_FLOOR, available_cash * STAKE_FRACTION), MAX_STAKE_CEILING), 2)
-        if available_cash < stake:
-            if available_cash >= MIN_STAKE_FLOOR:
-                stake = round(available_cash, 2)
+        stake = round(min(max(MIN_STAKE_FLOOR, temp_cash * STAKE_FRACTION), MAX_STAKE_CEILING), 2)
+        if temp_cash < stake:
+            if temp_cash >= MIN_STAKE_FLOOR:
+                stake = round(temp_cash, 2)
             else:
                 break
+        temp_cash -= stake
+        dispatches.append((cand, stake))
 
-        print(f"\n[LIVE ORDER QUALIFIED] {cand['asset']} {cand['direction'].upper()} @ {cand['ask']*100:.1f}¢ | T-{cand['remaining']}s | Stake: ${stake:.2f} | Submitting on Polymarket CLOB...", flush=True)
+    for cand, stake in dispatches:
+        proto = 'V3' if cand['use_pos_id'] else 'V2'
+        print(f"\n[LIVE ORDER QUALIFIED] {cand['asset']} {cand['direction'].upper()} [{proto}] @ {cand['ask']*100:.1f}¢ | T-{cand['remaining']}s | Stake: ${stake:.2f} | Submitting concurrently...", flush=True)
 
-        try:
-            parsed = execute_live_chaser(
-                cand['token_id'], stake, MAX_ACCEPTABLE_ASK, 3,
-                cand['asset'], cand['strike'], cand['safe_gap'],
-                cand['direction'].upper(), cand.get('opp_token_id'), cand['ask']
+    # Dispatch all qualified orders concurrently so simultaneous breakouts hit CLOB before 99c sweep
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(dispatches)) as exec_pool:
+        exec_futures = [
+            (
+                cand,
+                stake,
+                exec_pool.submit(
+                    execute_live_chaser,
+                    cand['token_id'], stake, MAX_ACCEPTABLE_ASK, 3,
+                    cand['asset'], cand['strike'], cand['safe_gap'],
+                    cand['direction'].upper(), cand.get('opp_token_id'), cand['ask'], cand['use_pos_id']
+                )
             )
+            for cand, stake in dispatches
+        ]
 
-            if parsed and parsed.get('success'):
-                executed_ask = float(parsed.get('executedAsk') or cand['ask'])
-                shares = round(stake / executed_ask, 2)
-                now_ts = int(time.time())
-                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                rule_desc = f"{cand['rule']} | LIVE ON-CHAIN ORDERBOOK Best Ask {executed_ask*100:.1f}¢ (Chaser Filled)"
+        for cand, stake, fut in exec_futures:
+            try:
+                parsed = fut.result(timeout=30)
+                if parsed and parsed.get('success'):
+                    executed_ask = float(parsed.get('executedAsk') or cand['ask'])
+                    shares = round(stake / executed_ask, 2)
+                    now_ts = int(time.time())
+                    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    rule_desc = f"{cand['rule']} | LIVE ON-CHAIN ORDERBOOK Best Ask {executed_ask*100:.1f}¢ (Chaser Filled)"
 
-                with conn:
-                    conn.execute("""
-                        INSERT INTO multi_trades 
-                        (cycle_id, asset, session_id, timestamp, call_time, direction, elapsed_seconds, remaining_seconds, spot_at_call, strike_price, gap_at_call, entry_price, shares, invested_usd, rule_triggered, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
-                    """, (cand['cycle_id'], cand['asset'], CURRENT_SESSION, now_ts, now_iso, cand['direction'],
-                          cand['elapsed'], cand['remaining'], cand['spot'], cand['strike'], cand['gap'], executed_ask,
-                          shares, stake, rule_desc))
+                    with conn:
+                        conn.execute("""
+                            INSERT INTO multi_trades 
+                            (cycle_id, asset, session_id, timestamp, call_time, direction, elapsed_seconds, remaining_seconds, spot_at_call, strike_price, gap_at_call, entry_price, shares, invested_usd, rule_triggered, status)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
+                        """, (cand['cycle_id'], cand['asset'], CURRENT_SESSION, now_ts, now_iso, cand['direction'],
+                              cand['elapsed'], cand['remaining'], cand['spot'], cand['strike'], cand['gap'], executed_ask,
+                              shares, stake, rule_desc))
 
-                available_cash -= stake
-                print(f"[LIVE BOT C FILLED!] {cand['asset']} {cand['direction'].upper()} @ {executed_ask*100:.1f}¢ | Stake: ${stake:.2f} ({shares} sh) | Gap: {cand['gap']:+,.4f} | T-{cand['remaining']}s | Avail Cash: ${available_cash:.2f}", flush=True)
-            else:
-                reason = parsed.get('reason') if parsed else 'UNFILLED_OR_TIMEOUT'
-                details = json.dumps(parsed) if parsed else 'No response from executor'
-                print(f"[LIVE EXECUTION ABORTED] Reason: {reason} | Details: {details[:150]}", flush=True)
+                    available_cash -= stake
+                    print(f"[LIVE BOT C FILLED!] {cand['asset']} {cand['direction'].upper()} @ {executed_ask*100:.1f}¢ | Stake: ${stake:.2f} ({shares} sh) | Gap: {cand['gap']:+,.4f} | T-{cand['remaining']}s | Avail Cash: ${available_cash:.2f}", flush=True)
+                else:
+                    reason = parsed.get('reason') if parsed else 'UNFILLED_OR_TIMEOUT'
+                    details = json.dumps(parsed) if parsed else 'No response from executor'
+                    print(f"[LIVE EXECUTION ABORTED] {cand['asset']} | Reason: {reason} | Details: {details[:240]}", flush=True)
 
-        except subprocess.TimeoutExpired:
-            print(f"[LIVE EXECUTION TIMEOUT] Order attempt timed out for {cand['asset']} {cand['direction']}", flush=True)
-        except Exception as e:
-            print(f"[LIVE EXECUTION ERROR] {str(e)}", flush=True)
+            except subprocess.TimeoutExpired:
+                print(f"[LIVE EXECUTION TIMEOUT] Order attempt timed out for {cand['asset']} {cand['direction']}", flush=True)
+            except Exception as e:
+                print(f"[LIVE EXECUTION ERROR] {cand['asset']}: {str(e)}", flush=True)
 
 def main():
     conn = sqlite3.connect(DB_PATH, timeout=15.0)
