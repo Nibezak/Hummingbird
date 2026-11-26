@@ -131,12 +131,13 @@ def fetch_live_orderbook_fill(token_id, opp_token_id, target_stake_usd, cur=None
     if not asks and cur and cycle_id and asset and direction:
         col = "up_best_ask" if direction.lower() == "up" else "down_best_ask"
         dep_col = "up_ask_depth" if direction.lower() == "up" else "down_ask_depth"
+        now_ts = int(time.time())
         cur.execute(f"""
             SELECT {col}, {dep_col} 
             FROM multi_snapshots 
-            WHERE cycle_id = ? AND asset = ? AND {col} IS NOT NULL 
+            WHERE cycle_id = ? AND asset = ? AND {col} IS NOT NULL AND timestamp >= ?
             ORDER BY id DESC LIMIT 1
-        """, (cycle_id, asset))
+        """, (cycle_id, asset, now_ts - 3))
         db_row = cur.fetchone()
         if db_row and db_row[0]:
             db_ask = float(db_row[0])
@@ -333,13 +334,13 @@ def evaluate_and_trade(conn):
 
         print(f"\n[LIVE ORDER QUALIFIED] {cand['asset']} {cand['direction'].upper()} @ {cand['ask']*100:.1f}¢ | T-{cand['remaining']}s | Stake: ${stake:.2f} | Submitting on Polymarket CLOB...", flush=True)
 
-        parsed = execute_live_chaser(
-            cand['token_id'], stake, MAX_ACCEPTABLE_ASK, 3,
-            cand['asset'], cand['strike'], cand['safe_gap'],
-            cand['direction'].upper(), cand.get('opp_token_id'), cand['ask']
-        )
-
         try:
+            parsed = execute_live_chaser(
+                cand['token_id'], stake, MAX_ACCEPTABLE_ASK, 3,
+                cand['asset'], cand['strike'], cand['safe_gap'],
+                cand['direction'].upper(), cand.get('opp_token_id'), cand['ask']
+            )
+
             if parsed and parsed.get('success'):
                 executed_ask = float(parsed.get('executedAsk') or cand['ask'])
                 shares = round(stake / executed_ask, 2)
@@ -359,8 +360,9 @@ def evaluate_and_trade(conn):
                 available_cash -= stake
                 print(f"[LIVE BOT C FILLED!] {cand['asset']} {cand['direction'].upper()} @ {executed_ask*100:.1f}¢ | Stake: ${stake:.2f} ({shares} sh) | Gap: {cand['gap']:+,.4f} | T-{cand['remaining']}s | Avail Cash: ${available_cash:.2f}", flush=True)
             else:
-                reason = parsed.get('reason') if parsed else 'UNKNOWN_OR_TIMEOUT'
-                print(f"[LIVE EXECUTION ABORTED] Reason: {reason} | Output: {exec_res.stdout[:150]}", flush=True)
+                reason = parsed.get('reason') if parsed else 'UNFILLED_OR_TIMEOUT'
+                details = json.dumps(parsed) if parsed else 'No response from executor'
+                print(f"[LIVE EXECUTION ABORTED] Reason: {reason} | Details: {details[:150]}", flush=True)
 
         except subprocess.TimeoutExpired:
             print(f"[LIVE EXECUTION TIMEOUT] Order attempt timed out for {cand['asset']} {cand['direction']}", flush=True)
