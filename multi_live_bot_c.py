@@ -112,22 +112,7 @@ def fetch_live_orderbook_fill(token_id, opp_token_id, target_stake_usd, cur=None
         except Exception:
             pass
 
-    # 2. Fetch synthetic asks from opposite token bids
-    if opp_token_id:
-        try:
-            opp_url = f"https://clob.polymarket.com/book?token_id={opp_token_id}"
-            req = urllib.request.Request(opp_url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=3.5) as resp:
-                opp_book = json.loads(resp.read().decode('utf-8'))
-                for b in opp_book.get("bids", []):
-                    bp, bs = float(b["price"]), float(b["size"])
-                    syn_p = round(1.0 - bp, 4)
-                    if syn_p > 0 and bs > 0:
-                        asks.append({'price': syn_p, 'size': bs, 'type': 'synthetic'})
-        except Exception:
-            pass
-
-    # 3. Fallback to recent snapshot ask if live API was temporarily unreachable
+    # 2. Fallback to recent snapshot ask if live API was temporarily unreachable (strictly <= 3s)
     if not asks and cur and cycle_id and asset and direction:
         col = "up_best_ask" if direction.lower() == "up" else "down_best_ask"
         dep_col = "up_ask_depth" if direction.lower() == "up" else "down_ask_depth"

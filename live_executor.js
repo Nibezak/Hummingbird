@@ -66,8 +66,7 @@ function httpGetJson(url) {
 async function fetchOrderBook(tokenID, oppTokenID = null) {
   try {
     const pDirect = httpGetJson(`https://clob.polymarket.com/book?token_id=${tokenID}`);
-    const pOpp = oppTokenID ? httpGetJson(`https://clob.polymarket.com/book?token_id=${oppTokenID}`) : Promise.resolve(null);
-    const [data, oppData] = await Promise.all([pDirect.catch(() => null), pOpp.catch(() => null)]);
+    const data = await pDirect.catch(() => null);
 
     let asks = [];
     let bids = [];
@@ -82,17 +81,6 @@ async function fetchOrderBook(tokenID, oppTokenID = null) {
         const p = parseFloat(b.price);
         const s = parseFloat(b.size);
         if (p > 0 && s > 0) bids.push({ price: p, size: s, type: 'direct' });
-      }
-    }
-
-    if (oppData) {
-      for (const b of (oppData.bids || [])) {
-        const bp = parseFloat(b.price);
-        const bs = parseFloat(b.size);
-        const synPrice = Math.round((1.0 - bp) * 10000) / 10000;
-        if (synPrice > 0 && bs > 0) {
-          asks.push({ price: synPrice, size: bs, type: 'synthetic' });
-        }
       }
     }
 
@@ -242,9 +230,16 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
     // Polymarket automatically fills at the cheapest available price, but sweeps up to 0.98
     // if the bottom tier was taken by faster bots.
     try {
+      if (!book.bestAsk || book.askDepth < 0.50) {
+        console.log(`[CHASER ${attempt}] DIRECT BOOK EMPTY: No direct sell orders on this token (Depth: $${book.askDepth}).`);
+        history.push({ attempt, status: 'NO_DIRECT_DEPTH', bestAsk: null, latencyMs: Date.now() - tStart });
+        if (attempt < maxRetries) await new Promise(r => setTimeout(r, retryDelayMs));
+        continue;
+      }
+
       const ceilingPrice = maxAcceptablePrice;
       const displayAsk = book.bestAsk || candidateAsk;
-      console.log(`[CHASER ${attempt}] Submitting FAK Buy (Best: ${displayAsk}c | Ceiling: ${ceilingPrice}c | Depth: $${book.askDepth})...`);
+      console.log(`[CHASER ${attempt}] Submitting FAK Buy (Direct Ask: ${displayAsk}c | Ceiling: ${ceilingPrice}c | Direct Depth: $${book.askDepth})...`);
       
       const marketOrder = await client.createMarketOrder({
         tokenID,
@@ -255,6 +250,7 @@ async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
       });
 
       const result = await client.postOrder(marketOrder, clobPkg.OrderType.FAK);
+      console.log(`[CHASER ${attempt}] CLOB response: status=${result?.status}, success=${result?.success}, orderID=${result?.orderID}, error=${result?.errorMsg || 'none'}`);
       const isMatched = result && (result.status === 'matched' || result.takingAmount || result.success);
 
       let executedPrice = displayAsk;
