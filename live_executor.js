@@ -704,12 +704,12 @@ class EdgeFastMonitor {
     const book = this.wsBooks.get(String(tokenID));
     const oppBook = oppTokenID ? this.wsBooks.get(String(oppTokenID)) : null;
 
-    let directAsk = (book && book.bestAsk !== null && Date.now() - book.updatedAt < 4000) ? book.bestAsk : null;
+    let directAsk = (book && book.bestAsk !== null && Date.now() - book.updatedAt < 45000) ? book.bestAsk : null;
     let directDepth = directAsk ? (book.askDepth || 0) : 0;
 
     let synthAsk = null;
     let synthDepth = 0;
-    if (oppBook && oppBook.bestBid !== null && Date.now() - oppBook.updatedAt < 4000) {
+    if (oppBook && oppBook.bestBid !== null && Date.now() - oppBook.updatedAt < 45000) {
       if (oppBook.bestBid > 0 && oppBook.bestBid < 1.0) {
         synthAsk = Math.round((1.0 - oppBook.bestBid) * 10000) / 10000;
         synthDepth = oppBook.bidDepth || 0;
