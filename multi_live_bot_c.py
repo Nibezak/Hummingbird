@@ -20,7 +20,7 @@ MAX_STAKE_CEILING = 15.00   # Upper safety ceiling per trade
 MAX_ACCEPTABLE_ASK = 0.98
 STRONG_98C_THRESHOLD = 0.70 # Allow 98c only when gap >= 0.70x raw HF boundary
 MIN_ACCEPTABLE_ASK = 0.80
-MIN_REMAINING_SECONDS = 45
+MIN_REMAINING_SECONDS = 35
 MAX_REMAINING_SECONDS = 120
 ASSET_GAP_MULTIPLIERS = {
     'BTC': 0.45, 'ETH': 0.50, 'SOL': 0.55, 'XRP': 0.55,
@@ -88,7 +88,27 @@ def get_wallet_balance(conn):
     row = cur.fetchone()
     return row[0] if row else 6.34
 
+def sync_live_wallet_balance(conn):
+    """Sync exact on-chain Polymarket USDC balance directly into multi_wallet to eliminate any rounding drift."""
+    try:
+        url = "http://127.0.0.1:8897/balance"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            if data and 'balanceUSDC' in data:
+                onchain_bal = round(float(data['balanceUSDC']), 2)
+                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                with conn:
+                    conn.execute("UPDATE multi_wallet SET balance = ?, updated_at = ? WHERE id = ?", (onchain_bal, now_iso, WALLET_ID))
+                return onchain_bal
+    except Exception:
+        pass
+    return None
+
 def update_wallet_balance(conn, pnl):
+    onchain = sync_live_wallet_balance(conn)
+    if onchain is not None:
+        return onchain
     cur = conn.cursor()
     cur.execute("SELECT balance FROM multi_wallet WHERE id = ?", (WALLET_ID,))
     current = cur.fetchone()[0]
@@ -112,8 +132,8 @@ def parse_executor_output(text):
 
 def fetch_live_orderbook_fill(token_id, opp_token_id, target_stake_usd, cur=None, cycle_id=None, asset=None, direction=None):
     """
-    Simulates real Polymarket CLOB Taker execution by traversing live orderbook asks.
-    ZERO synthetic static fallbacks.
+    Simulates real Polymarket CLOB Taker execution by traversing live orderbook asks,
+    including synthetic dual-book traversal (1.0 - opposite token bid).
     """
     asks = []
     
@@ -128,6 +148,21 @@ def fetch_live_orderbook_fill(token_id, opp_token_id, target_stake_usd, cur=None
                     p, s = float(a["price"]), float(a["size"])
                     if p > 0 and s > 0:
                         asks.append({'price': p, 'size': s, 'type': 'direct'})
+        except Exception:
+            pass
+
+    # 2. Synthetic dual book: traverse opposite token bids
+    if opp_token_id:
+        try:
+            url_opp = f"https://clob.polymarket.com/book?token_id={opp_token_id}"
+            req_opp = urllib.request.Request(url_opp, headers=HEADERS)
+            with urllib.request.urlopen(req_opp, timeout=3.5) as resp_opp:
+                book_opp = json.loads(resp_opp.read().decode('utf-8'))
+                for b in book_opp.get("bids", []):
+                    bp, bs = float(b["price"]), float(b["size"])
+                    if 0 < bp < 1.0 and bs > 0:
+                        synth_p = round(1.0 - bp, 4)
+                        asks.append({'price': synth_p, 'size': bs, 'type': 'synthetic'})
         except Exception:
             pass
 
@@ -208,11 +243,12 @@ def resolve_settled_trades(conn):
         verdict = "WON!" if is_winner else "LOST (-100%)"
         print(f"\n[LIVE SETTLED {asset}] Trade #{t_id} (Cycle {cid}) | Prediction: {direction.upper()} | Winner: {winner.upper()} -> {verdict} | PnL: ${pnl:+.2f} | Bankroll: ${new_wallet:.2f}", flush=True)
 
-def fetch_books_via_daemon(token_ids):
-    """Fetch multiple CLOB orderbooks in one local call over pre-warmed TLS keep-alive sockets."""
+def fetch_books_via_daemon(probes):
+    """Fetch multiple CLOB orderbooks in one local call over pre-warmed TLS keep-alive sockets with synthetic dual-book traversal."""
     try:
         url = "http://127.0.0.1:8897/books"
-        payload = json.dumps({"tokenIDs": [str(t) for t in token_ids]}).encode('utf-8')
+        pairs = [{"token_id": str(p['token_id']), "opp_token_id": str(p['opp_token_id']) if p.get('opp_token_id') else None} for p in probes]
+        payload = json.dumps({"pairs": pairs}).encode('utf-8')
         req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=3.5) as resp:
             return json.loads(resp.read().decode('utf-8')).get("books")
@@ -307,6 +343,11 @@ def sync_and_arm_fast_executor(conn):
         pass
 
     # 2. Push current cycle state + pre-computed boundaries to Node WS engine (~1s cadence or on state change)
+    now = time.time()
+    if now - _LAST_ARM_STATE.get('bal_ts', 0.0) >= 30.0:
+        sync_live_wallet_balance(conn)
+        _LAST_ARM_STATE['bal_ts'] = now
+
     wallet_balance = get_wallet_balance(conn)
     cur.execute("SELECT COALESCE(SUM(invested_usd), 0) FROM multi_trades WHERE session_id = ? AND status = 'OPEN'", (CURRENT_SESSION,))
     open_in_play = cur.fetchone()[0] or 0.0
@@ -430,7 +471,7 @@ def evaluate_and_trade(conn):
         if not strike:
             continue
 
-        # Bot C Ultra HF evaluates in positive-EV early/mid window (T-120s to T-45s)
+        # Bot C Ultra HF evaluates in positive-EV early/mid window (T-120s to T-35s)
         if remaining > MAX_REMAINING_SECONDS or remaining < MIN_REMAINING_SECONDS:
             continue
 
@@ -464,8 +505,8 @@ def evaluate_and_trade(conn):
     if not qualified_probes:
         return
 
-    # Fetch direct CLOB asks via pre-warmed keep-alive Node daemon (~80ms total), fallback to parallel Python
-    daemon_books = fetch_books_via_daemon([p['token_id'] for p in qualified_probes])
+    # Fetch direct CLOB asks via pre-warmed keep-alive Node daemon (~80ms total) with synthetic dual-book support
+    daemon_books = fetch_books_via_daemon(qualified_probes)
     if daemon_books is not None:
         for p in qualified_probes:
             bk = daemon_books.get(str(p['token_id']))
@@ -475,6 +516,7 @@ def evaluate_and_trade(conn):
                     if b_ask <= 0.97 or abs(p['gap']) >= p['strong_98c_req']:
                         p['ask'] = b_ask
                         p['depth'] = float(bk['askDepth'])
+                        p['is_synthetic'] = bk.get('isSynthetic', False)
                         candidates.append(p)
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(qualified_probes)) as book_pool:
@@ -493,6 +535,7 @@ def evaluate_and_trade(conn):
                     if fill['best_ask'] <= 0.97 or abs(p['gap']) >= p['strong_98c_req']:
                         p['ask'] = fill['best_ask']
                         p['depth'] = fill['depth']
+                        p['is_synthetic'] = fill.get('is_synthetic', False)
                         candidates.append(p)
 
     if not candidates:
@@ -514,7 +557,8 @@ def evaluate_and_trade(conn):
 
     for cand, stake in dispatches:
         proto = 'V3' if cand['use_pos_id'] else 'V2'
-        print(f"\n[LIVE ORDER QUALIFIED] {cand['asset']} {cand['direction'].upper()} [{proto}] @ {cand['ask']*100:.1f}¢ | T-{cand['remaining']}s | Stake: ${stake:.2f} | Submitting concurrently...", flush=True)
+        synth_str = ' [SYNTHETIC DUAL-BOOK]' if cand.get('is_synthetic') else ''
+        print(f"\n[LIVE ORDER QUALIFIED] {cand['asset']} {cand['direction'].upper()} [{proto}]{synth_str} @ {cand['ask']*100:.1f}¢ | T-{cand['remaining']}s | Stake: ${stake:.2f} | Submitting concurrently...", flush=True)
 
     # Dispatch all qualified orders concurrently so simultaneous breakouts hit CLOB before 99c sweep
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(dispatches)) as exec_pool:

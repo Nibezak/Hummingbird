@@ -72,8 +72,11 @@ function httpGetJson(url) {
 
 async function fetchOrderBook(tokenID, oppTokenID = null) {
   try {
-    const pDirect = httpGetJson(`https://clob.polymarket.com/book?token_id=${tokenID}`);
-    const data = await pDirect.catch(() => null);
+    const fetches = [httpGetJson(`https://clob.polymarket.com/book?token_id=${tokenID}`).catch(() => null)];
+    if (oppTokenID) {
+      fetches.push(httpGetJson(`https://clob.polymarket.com/book?token_id=${oppTokenID}`).catch(() => null));
+    }
+    const [data, oppData] = await Promise.all(fetches);
 
     let asks = [];
     let bids = [];
@@ -91,15 +94,28 @@ async function fetchOrderBook(tokenID, oppTokenID = null) {
       }
     }
 
+    // Synthetic traversal: opposite token bids become synthetic asks (1.0 - Price(opp bid))
+    if (oppData && Array.isArray(oppData.bids)) {
+      for (const b of oppData.bids) {
+        const bp = parseFloat(b.price);
+        const bs = parseFloat(b.size);
+        if (bp > 0 && bp < 1.0 && bs > 0) {
+          const synthPrice = Math.round((1.0 - bp) * 10000) / 10000;
+          asks.push({ price: synthPrice, size: bs, type: 'synthetic' });
+        }
+      }
+    }
+
     asks.sort((a, b) => a.price - b.price);
     bids.sort((a, b) => b.price - a.price);
 
     const bestAsk = asks.length > 0 ? asks[0].price : null;
     const bestBid = bids.length > 0 ? bids[0].price : null;
+    const askType = asks.length > 0 ? asks[0].type : 'direct';
     const askDepth = asks.slice(0, 5).reduce((sum, a) => sum + (a.price * a.size), 0);
-    return { bestAsk, bestBid, askDepth: Math.round(askDepth * 100) / 100, asks, bids };
+    return { bestAsk, bestBid, askDepth: Math.round(askDepth * 100) / 100, askType, asks, bids };
   } catch (err) {
-    return { bestAsk: null, bestBid: null, askDepth: 0, asks: [], bids: [], error: err.message };
+    return { bestAsk: null, bestBid: null, askDepth: 0, askType: 'direct', asks: [], bids: [], error: err.message };
   }
 }
 
@@ -564,8 +580,8 @@ class EdgeFastMonitor {
         const touchedAssets = new Set();
         const items = Array.isArray(msg) ? msg : [msg];
         for (const item of items) {
-          if (item && item.asset_id && Array.isArray(item.asks)) {
-            this.applySnapshot(String(item.asset_id), item.asks);
+          if (item && item.asset_id && (Array.isArray(item.asks) || Array.isArray(item.bids))) {
+            this.applySnapshot(String(item.asset_id), item.asks || [], item.bids || []);
             const asset = this.tokenToAsset.get(String(item.asset_id));
             if (asset) touchedAssets.add(asset);
           } else if (item && Array.isArray(item.price_changes)) {
@@ -600,29 +616,51 @@ class EdgeFastMonitor {
   }
 
   recomputeTop(book) {
-    const levels = [];
+    const askLevels = [];
     for (const [pStr, sNum] of book.asksMap.entries()) {
       const p = parseFloat(pStr);
-      if (p > 0 && sNum > 0) levels.push([p, sNum]);
+      if (p > 0 && sNum > 0) askLevels.push([p, sNum]);
     }
-    levels.sort((a, b) => a[0] - b[0]);
-    book.bestAsk = levels.length > 0 ? levels[0][0] : null;
-    let depth = 0;
-    for (let i = 0; i < Math.min(5, levels.length); i++) {
-      depth += levels[i][0] * levels[i][1];
+    askLevels.sort((a, b) => a[0] - b[0]);
+    book.bestAsk = askLevels.length > 0 ? askLevels[0][0] : null;
+    let aDepth = 0;
+    for (let i = 0; i < Math.min(5, askLevels.length); i++) {
+      aDepth += askLevels[i][0] * askLevels[i][1];
     }
-    book.askDepth = Math.round(depth * 100) / 100;
+    book.askDepth = Math.round(aDepth * 100) / 100;
+
+    const bidLevels = [];
+    if (book.bidsMap) {
+      for (const [pStr, sNum] of book.bidsMap.entries()) {
+        const p = parseFloat(pStr);
+        if (p > 0 && sNum > 0) bidLevels.push([p, sNum]);
+      }
+      bidLevels.sort((a, b) => b[0] - a[0]); // highest bid first
+    }
+    book.bestBid = bidLevels.length > 0 ? bidLevels[0][0] : null;
+    let bDepth = 0;
+    for (let i = 0; i < Math.min(5, bidLevels.length); i++) {
+      bDepth += bidLevels[i][0] * bidLevels[i][1];
+    }
+    book.bidDepth = Math.round(bDepth * 100) / 100;
+
     book.updatedAt = Date.now();
   }
 
-  applySnapshot(tokenID, asksArr) {
+  applySnapshot(tokenID, asksArr = [], bidsArr = []) {
     const asksMap = new Map();
     for (const a of asksArr) {
       const p = String(a.price);
       const s = parseFloat(a.size);
       if (parseFloat(p) > 0 && s > 0) asksMap.set(p, s);
     }
-    const book = { asksMap, bestAsk: null, askDepth: 0, updatedAt: Date.now() };
+    const bidsMap = new Map();
+    for (const b of bidsArr) {
+      const p = String(b.price);
+      const s = parseFloat(b.size);
+      if (parseFloat(p) > 0 && s > 0) bidsMap.set(p, s);
+    }
+    const book = { asksMap, bidsMap, bestAsk: null, bestBid: null, askDepth: 0, bidDepth: 0, updatedAt: Date.now() };
     this.recomputeTop(book);
     this.wsBooks.set(tokenID, book);
   }
@@ -630,14 +668,22 @@ class EdgeFastMonitor {
   applyPriceChange(tokenID, pc) {
     let book = this.wsBooks.get(tokenID);
     if (!book) {
-      book = { asksMap: new Map(), bestAsk: null, askDepth: 0, updatedAt: Date.now() };
+      book = { asksMap: new Map(), bidsMap: new Map(), bestAsk: null, bestBid: null, askDepth: 0, bidDepth: 0, updatedAt: Date.now() };
       this.wsBooks.set(tokenID, book);
     }
-    if (String(pc.side || '').toUpperCase() === 'SELL' && pc.price !== undefined) {
+    if (!book.bidsMap) book.bidsMap = new Map();
+    const side = String(pc.side || '').toUpperCase();
+    if (side === 'SELL' && pc.price !== undefined) {
       const pKey = String(pc.price);
       const sz = parseFloat(pc.size || '0');
       if (sz > 0) book.asksMap.set(pKey, sz);
       else book.asksMap.delete(pKey);
+      this.recomputeTop(book);
+    } else if (side === 'BUY' && pc.price !== undefined) {
+      const pKey = String(pc.price);
+      const sz = parseFloat(pc.size || '0');
+      if (sz > 0) book.bidsMap.set(pKey, sz);
+      else book.bidsMap.delete(pKey);
       this.recomputeTop(book);
     } else if (pc.best_ask !== undefined) {
       const ba = parseFloat(pc.best_ask);
@@ -645,7 +691,43 @@ class EdgeFastMonitor {
         book.bestAsk = ba;
         book.updatedAt = Date.now();
       }
+    } else if (pc.best_bid !== undefined) {
+      const bb = parseFloat(pc.best_bid);
+      if (bb > 0 && bb < 1 && book.bidsMap.size === 0) {
+        book.bestBid = bb;
+        book.updatedAt = Date.now();
+      }
     }
+  }
+
+  getEffectiveAsk(tokenID, oppTokenID) {
+    const book = this.wsBooks.get(String(tokenID));
+    const oppBook = oppTokenID ? this.wsBooks.get(String(oppTokenID)) : null;
+
+    let directAsk = (book && book.bestAsk !== null && Date.now() - book.updatedAt < 4000) ? book.bestAsk : null;
+    let directDepth = directAsk ? (book.askDepth || 0) : 0;
+
+    let synthAsk = null;
+    let synthDepth = 0;
+    if (oppBook && oppBook.bestBid !== null && Date.now() - oppBook.updatedAt < 4000) {
+      if (oppBook.bestBid > 0 && oppBook.bestBid < 1.0) {
+        synthAsk = Math.round((1.0 - oppBook.bestBid) * 10000) / 10000;
+        synthDepth = oppBook.bidDepth || 0;
+      }
+    }
+
+    if (directAsk !== null && synthAsk !== null) {
+      if (directAsk <= synthAsk) {
+        return { bestAsk: directAsk, askDepth: directDepth, isSynthetic: false };
+      } else {
+        return { bestAsk: synthAsk, askDepth: synthDepth, isSynthetic: true };
+      }
+    } else if (directAsk !== null) {
+      return { bestAsk: directAsk, askDepth: directDepth, isSynthetic: false };
+    } else if (synthAsk !== null) {
+      return { bestAsk: synthAsk, askDepth: synthDepth, isSynthetic: true };
+    }
+    return { bestAsk: null, askDepth: 0, isSynthetic: false };
   }
 
   armCycle(payload) {
@@ -677,7 +759,7 @@ class EdgeFastMonitor {
       end_ts: Number(payload.end_ts || 0),
       available_cash: Number(payload.available_cash || 0),
       blackout_active: Boolean(payload.blackout_active),
-      min_rem: Number(payload.min_rem ?? 45),
+      min_rem: Number(payload.min_rem ?? 35),
       max_rem: Number(payload.max_rem ?? 120),
       stake_fraction: Number(payload.stake_fraction ?? 0.20),
       min_floor: Number(payload.min_floor ?? 1.00),
@@ -765,10 +847,10 @@ class EdgeFastMonitor {
       return;
     }
 
-    const book = this.wsBooks.get(tokenID);
-    if (!book || book.bestAsk === null || book.askDepth < 0.50) return;
-    if (book.bestAsk < cycle.min_ask || book.bestAsk > cycle.max_ask) return;
-    if (book.bestAsk > 0.97 && Math.abs(gap) < strong98Req) return;
+    const eff = this.getEffectiveAsk(tokenID, oppTokenID);
+    if (eff.bestAsk === null || eff.askDepth < 0.50) return;
+    if (eff.bestAsk < cycle.min_ask || eff.bestAsk > cycle.max_ask) return;
+    if (eff.bestAsk > 0.97 && Math.abs(gap) < strong98Req) return;
 
     let stake = Math.round(Math.min(Math.max(cycle.min_floor, cycle.available_cash * cycle.stake_fraction), cycle.max_ceiling) * 100) / 100;
     if (cycle.available_cash < stake) {
@@ -781,11 +863,12 @@ class EdgeFastMonitor {
     cycle.available_cash = Math.round((cycle.available_cash - stake) * 100) / 100;
 
     const elapsed = Math.max(0, 300 - remaining);
-    const snapAsk = book.bestAsk;
-    const snapDepth = book.askDepth;
+    const snapAsk = eff.bestAsk;
+    const snapDepth = eff.askDepth;
     const usePosId = Boolean(assetInfo.use_pos_id);
+    const synthTag = eff.isSynthetic ? ' [SYNTHETIC DUAL-BOOK]' : '';
 
-    console.log(`\n[SUB-100MS WS TRIGGER] ${asset} ${direction.toUpperCase()} [${usePosId ? 'V3' : 'V2'}] @ ${(snapAsk * 100).toFixed(1)}c (Depth $${snapDepth}) | T-${remaining}s | Stake $${stake.toFixed(2)}`);
+    console.log(`\n[SUB-100MS WS TRIGGER] ${asset} ${direction.toUpperCase()} [${usePosId ? 'V3' : 'V2'}]${synthTag} @ ${(snapAsk * 100).toFixed(1)}c (Depth $${snapDepth}) | T-${remaining}s | Stake $${stake.toFixed(2)}`);
 
     submitFakWithFallback(cachedClient, tokenID, usePosId, stake, cycle.max_ask).then((execRes) => {
       const localPipelineMs = Math.round(Math.max(execRes.signMs, performance.now() - tDetect - execRes.postMs) * 10) / 10;
@@ -886,15 +969,23 @@ function startExecutionServer(port = 8897) {
         return sendJson(res, 200, result);
       } else if (req.method === 'POST' && req.url === '/books') {
         const payload = await readJsonBody(req);
-        const tokenIDs = Array.isArray(payload.tokenIDs) ? payload.tokenIDs : [];
-        const results = await Promise.all(tokenIDs.map(async id => {
-          const sId = String(id);
-          const wsBook = fastMonitor.wsBooks.get(sId);
-          if (wsBook && wsBook.bestAsk !== null && Date.now() - wsBook.updatedAt < 4000) {
-            return [sId, { bestAsk: wsBook.bestAsk, askDepth: wsBook.askDepth, source: 'ws' }];
+        let pairs = [];
+        if (Array.isArray(payload.pairs)) {
+          pairs = payload.pairs;
+        } else if (Array.isArray(payload.tokenIDs)) {
+          pairs = payload.tokenIDs.map(id => ({ token_id: id, opp_token_id: null }));
+        }
+        const results = await Promise.all(pairs.map(async p => {
+          const sId = String(p.token_id || p.tokenID || '');
+          const oppId = (p.opp_token_id || p.oppTokenID) ? String(p.opp_token_id || p.oppTokenID) : null;
+          if (!sId) return [sId, { bestAsk: null, askDepth: 0 }];
+
+          const eff = fastMonitor.getEffectiveAsk(sId, oppId);
+          if (eff.bestAsk !== null) {
+            return [sId, { bestAsk: eff.bestAsk, askDepth: eff.askDepth, isSynthetic: eff.isSynthetic, source: 'ws' }];
           }
-          const b = await fetchOrderBook(sId);
-          return [sId, { bestAsk: b.bestAsk, askDepth: b.askDepth, source: 'rest' }];
+          const b = await fetchOrderBook(sId, oppId);
+          return [sId, { bestAsk: b.bestAsk, askDepth: b.askDepth, isSynthetic: b.askType === 'synthetic', source: 'rest' }];
         }));
         return sendJson(res, 200, { books: Object.fromEntries(results) });
       } else if (req.method === 'POST' && req.url === '/prewarm') {
@@ -912,6 +1003,9 @@ function startExecutionServer(port = 8897) {
         const ackIds = new Set((payload.fill_ids || []).map(Number));
         fastMonitor.pendingFastFills = fastMonitor.pendingFastFills.filter(f => !ackIds.has(f.fill_id));
         return sendJson(res, 200, { remaining: fastMonitor.pendingFastFills.length });
+      } else if (req.method === 'GET' && req.url === '/balance') {
+        const bal = await getBalance();
+        return sendJson(res, 200, bal);
       } else if (req.method === 'GET' && req.url === '/ping') {
         return sendJson(res, 200, {
           status: 'ready',

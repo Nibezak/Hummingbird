@@ -17,7 +17,7 @@ STAKE_FRACTION = 0.20
 MIN_ACCEPTABLE_ASK = 0.80
 MAX_ACCEPTABLE_ASK = 0.98
 STRONG_98C_THRESHOLD = 0.70
-MIN_REMAINING_SECONDS = 45
+MIN_REMAINING_SECONDS = 35
 MAX_REMAINING_SECONDS = 120
 ASSET_GAP_MULTIPLIERS = {
     'BTC': 0.45, 'ETH': 0.50, 'SOL': 0.55, 'XRP': 0.55,
@@ -117,6 +117,21 @@ def fetch_live_orderbook_fill(token_id, opp_token_id, target_stake_usd, cur=None
                     p, s = float(a["price"]), float(a["size"])
                     if p > 0 and s > 0:
                         asks.append({'price': p, 'size': s, 'type': 'direct'})
+        except Exception:
+            pass
+
+    # 2. Synthetic dual book: traverse opposite token bids (1.0 - Price(opp bid))
+    if opp_token_id:
+        try:
+            url_opp = f"https://clob.polymarket.com/book?token_id={opp_token_id}"
+            req_opp = urllib.request.Request(url_opp, headers=HEADERS)
+            with urllib.request.urlopen(req_opp, timeout=3.5) as resp_opp:
+                book_opp = json.loads(resp_opp.read().decode('utf-8'))
+                for b in book_opp.get("bids", []):
+                    bp, bs = float(b["price"]), float(b["size"])
+                    if 0 < bp < 1.0 and bs > 0:
+                        synth_p = round(1.0 - bp, 4)
+                        asks.append({'price': synth_p, 'size': bs, 'type': 'synthetic'})
         except Exception:
             pass
 
@@ -235,7 +250,7 @@ def evaluate_and_trade(conn):
         if not strike:
             continue
 
-        # Bot C Ultra HF evaluates in positive-EV early/mid window (T-120s to T-45s)
+        # Bot C Ultra HF evaluates in positive-EV early/mid window (T-120s to T-35s)
         if remaining > MAX_REMAINING_SECONDS or remaining < MIN_REMAINING_SECONDS:
             continue
 
