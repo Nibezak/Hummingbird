@@ -353,12 +353,26 @@ def sync_and_arm_fast_executor(conn):
     open_in_play = cur.fetchone()[0] or 0.0
     available_cash = round(max(0.0, wallet_balance - open_in_play), 2)
 
+    now_ts = int(time.time())
+    # Always select the current live 5m cycle matching wall-clock time (never an old lingering cycle)
     cur.execute("""
         SELECT cycle_id, asset, strike_price, up_token_id, down_token_id, condition_id
         FROM multi_cycles
-        WHERE status = 'ACTIVE' AND strike_price IS NOT NULL
-    """)
+        WHERE cycle_id = (
+            SELECT MAX(cycle_id) FROM multi_cycles 
+            WHERE strike_price IS NOT NULL AND cycle_id <= ? AND (cycle_id + 300) > ?
+        )
+        AND strike_price IS NOT NULL
+    """, (now_ts, now_ts))
     cycles = cur.fetchall()
+    if not cycles:
+        cur.execute("""
+            SELECT cycle_id, asset, strike_price, up_token_id, down_token_id, condition_id
+            FROM multi_cycles
+            WHERE cycle_id = (SELECT MAX(cycle_id) FROM multi_cycles WHERE strike_price IS NOT NULL)
+            AND strike_price IS NOT NULL
+        """)
+        cycles = cur.fetchall()
     if not cycles:
         return
 
