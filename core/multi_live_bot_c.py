@@ -17,7 +17,7 @@ WALLET_ID = 4  # Wallet 4 for LIVE BOT C (Real USDC on Polymarket)
 STAKE_FRACTION = 0.20       # 20% compounding of available cash
 MIN_STAKE_FLOOR = 1.00      # Polymarket CLOB minimum taker order size ($1.00 USDC)
 MAX_STAKE_CEILING = 15.00   # Upper safety ceiling per trade
-MAX_ACCEPTABLE_ASK = 0.98
+MAX_ACCEPTABLE_ASK = 0.989  # Allow up to 98.9¢ (including 98.7¢); strictly reject >= 99.0¢
 STRONG_98C_THRESHOLD = 0.70 # Allow 98c only when gap >= 0.70x raw HF boundary
 MIN_ACCEPTABLE_ASK = 0.80
 MIN_REMAINING_SECONDS = 35
@@ -527,11 +527,10 @@ def evaluate_and_trade(conn):
             if bk and bk.get('bestAsk') and bk.get('askDepth', 0) >= 0.50:
                 b_ask = float(bk['bestAsk'])
                 if MIN_ACCEPTABLE_ASK <= b_ask <= MAX_ACCEPTABLE_ASK:
-                    if b_ask <= 0.97 or abs(p['gap']) >= p['strong_98c_req']:
-                        p['ask'] = b_ask
-                        p['depth'] = float(bk['askDepth'])
-                        p['is_synthetic'] = bk.get('isSynthetic', False)
-                        candidates.append(p)
+                    p['ask'] = b_ask
+                    p['depth'] = float(bk['askDepth'])
+                    p['is_synthetic'] = bk.get('isSynthetic', False)
+                    candidates.append(p)
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(qualified_probes)) as book_pool:
             fut_map = {
@@ -546,11 +545,10 @@ def evaluate_and_trade(conn):
                 if not fill:
                     fill = fetch_live_orderbook_fill(p['token_id'], p['opp_token_id'], nominal_stake, cur, p['cycle_id'], p['asset'], p['direction'])
                 if fill and (MIN_ACCEPTABLE_ASK <= fill['best_ask'] <= MAX_ACCEPTABLE_ASK):
-                    if fill['best_ask'] <= 0.97 or abs(p['gap']) >= p['strong_98c_req']:
-                        p['ask'] = fill['best_ask']
-                        p['depth'] = fill['depth']
-                        p['is_synthetic'] = fill.get('is_synthetic', False)
-                        candidates.append(p)
+                    p['ask'] = fill['best_ask']
+                    p['depth'] = fill['depth']
+                    p['is_synthetic'] = fill.get('is_synthetic', False)
+                    candidates.append(p)
 
     if not candidates:
         return
@@ -627,7 +625,7 @@ def main():
     print(f"MULTI-ASSET LIVE BOT C (REAL USDC TRADING) ACTIVATED (RUN #{CURRENT_SESSION})", flush=True)
     print(f"Initial Bankroll: ${get_wallet_balance(conn):.2f} USDC | Stake Sizing: 20% (Min Floor: ${MIN_STAKE_FLOOR:.2f}, Max Cap: ${MAX_STAKE_CEILING:.2f})", flush=True)
     print(f"Execution Engine: Polymarket CLOB Taker with Adaptive Chaser & Verification", flush=True)
-    print(f"Price Bounds: {MIN_ACCEPTABLE_ASK*100:.0f}¢ <= Ask <= 97¢ (98¢ @ >=0.70x) | Window: T-{MAX_REMAINING_SECONDS}s to T-{MIN_REMAINING_SECONDS}s", flush=True)
+    print(f"Price Bounds: {MIN_ACCEPTABLE_ASK*100:.0f}¢ <= Ask <= {MAX_ACCEPTABLE_ASK*100:.1f}¢ (Reject >= 99¢) | Window: T-{MAX_REMAINING_SECONDS}s to T-{MIN_REMAINING_SECONDS}s", flush=True)
     print(f"Blackout Windows: Asian Midday (06:50-07:30 EAT) | NYSE Bell (17:25-18:05 EAT) | EU Close (19:20-19:40 EAT)", flush=True)
     print("==================================================================", flush=True)
 

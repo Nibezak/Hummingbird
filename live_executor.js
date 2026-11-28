@@ -291,7 +291,7 @@ async function submitFakWithFallback(client, assetID, initialUsePositionId, amou
  */
 async function executeMarketBuyWithChaser(tokenID, amountUSD, options = {}) {
   const {
-    maxAcceptablePrice = 0.98,
+    maxAcceptablePrice = 0.989,
     maxRetries = 3,
     retryDelayMs = 15,
     asset = null,
@@ -766,7 +766,7 @@ class EdgeFastMonitor {
       max_ceiling: Number(payload.max_ceiling ?? 15.00),
       strong_98c_threshold: Number(payload.strong_98c_threshold ?? 0.70),
       min_ask: Number(payload.min_ask ?? 0.80),
-      max_ask: Number(payload.max_ask ?? 0.98),
+      max_ask: Number(payload.max_ask ?? 0.989),
       assetsMap
     };
 
@@ -850,7 +850,6 @@ class EdgeFastMonitor {
     const eff = this.getEffectiveAsk(tokenID, oppTokenID);
     if (eff.bestAsk === null || eff.askDepth < 0.50) return;
     if (eff.bestAsk < cycle.min_ask || eff.bestAsk > cycle.max_ask) return;
-    if (eff.bestAsk > 0.97 && Math.abs(gap) < strong98Req) return;
 
     let stake = Math.round(Math.min(Math.max(cycle.min_floor, cycle.available_cash * cycle.stake_fraction), cycle.max_ceiling) * 100) / 100;
     if (cycle.available_cash < stake) {

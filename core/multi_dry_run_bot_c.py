@@ -15,7 +15,7 @@ WALLET_ID = 3  # Wallet 3 for Bot C (Ultra High Frequency - T <= 120s)
 MAX_STAKE_CEILING = 15.00
 STAKE_FRACTION = 0.20
 MIN_ACCEPTABLE_ASK = 0.80
-MAX_ACCEPTABLE_ASK = 0.98
+MAX_ACCEPTABLE_ASK = 0.989  # Allow up to 98.9¢ (including 98.7¢); strictly reject >= 99.0¢
 STRONG_98C_THRESHOLD = 0.70
 MIN_REMAINING_SECONDS = 35
 MAX_REMAINING_SECONDS = 120
@@ -266,30 +266,28 @@ def evaluate_and_trade(conn):
             fill = fetch_live_orderbook_fill(up_tok, dn_tok, nominal_stake, cur, cid, asset, 'Up')
             if fill and (MIN_ACCEPTABLE_ASK <= fill['best_ask'] <= MAX_ACCEPTABLE_ASK):
                 ask = fill['best_ask']
-                if ask <= 0.97 or abs(gap) >= round(raw_up * STRONG_98C_THRESHOLD, 6):
-                    candidates.append({
-                        'asset': asset, 'cycle_id': cid, 'direction': 'Up', 'elapsed': elapsed,
-                        'remaining': remaining, 'spot': spot, 'strike': strike, 'gap': gap,
-                        'ask': ask, 'best_ask': fill['best_ask'], 'depth': fill['depth'],
-                        'shares': fill['shares'],
-                        'source': fill['source'],
-                        'rule': f'Bot C Ultra HF UP Gap >= +${up_safe} at T-{remaining}s'
-                    })
+                candidates.append({
+                    'asset': asset, 'cycle_id': cid, 'direction': 'Up', 'elapsed': elapsed,
+                    'remaining': remaining, 'spot': spot, 'strike': strike, 'gap': gap,
+                    'ask': ask, 'best_ask': fill['best_ask'], 'depth': fill['depth'],
+                    'shares': fill['shares'],
+                    'source': fill['source'],
+                    'rule': f'Bot C Ultra HF UP Gap >= +${up_safe} at T-{remaining}s'
+                })
 
         # Check DOWN
         elif gap <= dn_safe:
             fill = fetch_live_orderbook_fill(dn_tok, up_tok, nominal_stake, cur, cid, asset, 'Down')
             if fill and (MIN_ACCEPTABLE_ASK <= fill['best_ask'] <= MAX_ACCEPTABLE_ASK):
                 ask = fill['best_ask']
-                if ask <= 0.97 or abs(gap) >= round(abs(raw_dn) * STRONG_98C_THRESHOLD, 6):
-                    candidates.append({
-                        'asset': asset, 'cycle_id': cid, 'direction': 'Down', 'elapsed': elapsed,
-                        'remaining': remaining, 'spot': spot, 'strike': strike, 'gap': gap,
-                        'ask': ask, 'best_ask': fill['best_ask'], 'depth': fill['depth'],
-                        'shares': fill['shares'],
-                        'source': fill['source'],
-                        'rule': f'Bot C Ultra HF DOWN Gap <= ${dn_safe} at T-{remaining}s'
-                    })
+                candidates.append({
+                    'asset': asset, 'cycle_id': cid, 'direction': 'Down', 'elapsed': elapsed,
+                    'remaining': remaining, 'spot': spot, 'strike': strike, 'gap': gap,
+                    'ask': ask, 'best_ask': fill['best_ask'], 'depth': fill['depth'],
+                    'shares': fill['shares'],
+                    'source': fill['source'],
+                    'rule': f'Bot C Ultra HF DOWN Gap <= ${dn_safe} at T-{remaining}s'
+                })
 
     if not candidates:
         return
